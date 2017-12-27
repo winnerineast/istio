@@ -579,7 +579,7 @@ go_repository(
 
 go_repository(
     name = "com_github_open_policy_agent_opa",
-    commit = "d9f7f5f00f24e4fc4f9ef15c8afaf44b5b8612f9",  # Aug 15, 2017 (no releases)
+    commit = "4b934006914c7964e89563d54bbfc63167922aa0",  # Dec 7, 2017 (0.5.13)
     importpath = "github.com/open-policy-agent/opa",
 )
 
@@ -1112,7 +1112,7 @@ go_repository(
 
 # Change this and the pilot/docker/Dockerfile.proxy* files together
 # This SHA is obtained from proxy/postsubmit job
-ISTIO_PROXY_BUCKET = "f5d22ffcdb113ef5bc5633e2ea1c713adc3f5cfd"
+ISTIO_PROXY_BUCKET = "a7e4ff4e3ee3fefde0159436713c2a0777be31de"
 
 http_file(
     name = "envoy_binary",
