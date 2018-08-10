@@ -8,7 +8,7 @@ resources:
     zone: {{ properties['zone'] }}
     cluster:
       name: {{ properties['gkeClusterName'] }}
-      enableKubernetesAlpha: true
+      initialClusterVersion: 1.10.5
       legacyAbac:
         enabled: false
       initialNodeCount: {{ properties['initialNodeCount'] }}
@@ -75,49 +75,67 @@ resources:
       autoDelete: true
       initializeParams:
         diskName: {{ CLUSTER_NAME }}-vm-disk
-        sourceImage: https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/debian-8-jessie-v20170918
+        sourceImage: https://www.googleapis.com/compute/v1/projects/debian-cloud/global/images/family/debian-8
     metadata:
       items:
       - key: startup-script
         value: |
           #!/bin/bash -x
-          apt-get update && apt-get install -y git curl kubectl
+
+          apt-get update && apt-get install -y git google-cloud-sdk curl kubectl
+
           export HOME=/root
-          gcloud components update -q
-          gcloud components install beta -q
+          cd /root/
+
           gcloud container clusters get-credentials {{ properties['gkeClusterName'] }} --zone {{ properties['zone'] }}
           kubectl create clusterrolebinding cluster-admin-binding --clusterrole=cluster-admin --user=$(gcloud config get-value core/account)
-          curl -L https://raw.githubusercontent.com/istio/istio/master/release/downloadIstioCandidate.sh | ISTIO_VERSION={{ properties['installIstioRelease'] }} sh -
-          cd istio-{{ properties['installIstioRelease'] }}
+
+          wget https://github.com/istio/istio/releases/download/{{ properties['installIstioRelease'] }}/istio-{{ properties['installIstioRelease'] }}-linux.tar.gz
+          tar xzf istio-{{ properties['installIstioRelease'] }}-linux.tar.gz
+
+          wget -P /root/helm/ https://storage.googleapis.com/kubernetes-helm/helm-v2.9.1-linux-amd64.tar.gz
+          tar xf /root/helm/helm-v2.9.1-linux-amd64.tar.gz  -C /root/helm/
+
+          export PATH="$PATH:/root/istio-{{ properties['installIstioRelease'] }}/bin::/root/helm/linux-amd64/"
+          cd /root/istio-{{ properties['installIstioRelease'] }}
+
+          kubectl create ns istio-system
+
+          ISTIO_OPTIONS=" --set global.proxy.image=proxyv2 "
 
           {% if  properties['enableMutualTLS'] %}
-            kubectl apply -f install/kubernetes/istio-auth.yaml
-          {% else %}
-            kubectl apply -f install/kubernetes/istio.yaml
+            ISTIO_OPTIONS=$ISTIO_OPTIONS" --set global.mtls.enabled=true"
           {% endif %}
 
           {% if  properties['enableAutomaticSidecarInjection'] %}
-            kubectl apply -f install/kubernetes/istio-initializer.yaml
+            ISTIO_OPTIONS=$ISTIO_OPTIONS" --set sidecar-injector.enabled=true"
+          {% endif %}
+
+          {% if properties['enableGrafana'] or properties['enablePrometheus'] %}
+            ISTIO_OPTIONS=$ISTIO_OPTIONS" --set prometheus.enabled=true"
           {% endif %}
 
           {% if  properties['enableGrafana'] %}
-            kubectl apply -f install/kubernetes/addons/prometheus.yaml
-            kubectl apply -f install/kubernetes/addons/grafana.yaml
-          {% elif properties['enablePrometheus'] %}
-            kubectl apply -f install/kubernetes/addons/prometheus.yaml
+            ISTIO_OPTIONS=$ISTIO_OPTIONS" --set grafana.enabled=true"
           {% endif %}
 
-          {% if  properties['enableZipkin'] %}
-            kubectl apply -f install/kubernetes/addons/zipkin.yaml
+          {% if  properties['enableTracing'] %}
+            ISTIO_OPTIONS=$ISTIO_OPTIONS" --set tracing.enabled=true "
           {% endif %}
 
           {% if  properties['enableServiceGraph'] %}
-             kubectl apply -f install/kubernetes/addons/servicegraph.yaml
+            ISTIO_OPTIONS=$ISTIO_OPTIONS" --set servicegraph.enabled=true"
           {% endif %}
 
-          {% if  properties['enableBookInfoSample'] %}
-             kubectl apply -f samples/bookinfo/kube/bookinfo.yaml
-          {% endif %}
+          helm template install/kubernetes/helm/istio --name istio --namespace istio-system $ISTIO_OPTIONS  > istio.yaml
+
+          kubectl apply -f istio.yaml
+          kubectl label namespace default istio-injection=enabled
+
+          sleep 150
+
+          kubectl apply -f samples/bookinfo/platform/kube/bookinfo.yaml
+          bin/istioctl create -f samples/bookinfo/networking/bookinfo-gateway.yaml
 
           gcloud beta runtime-config configs variables set success/{{ CLUSTER_NAME }}-waiter success --config-name $(ref.{{ CLUSTER_NAME }}-config.name)
           gcloud -q compute instances delete {{ CLUSTER_NAME }}-vm --zone {{ properties['zone'] }}

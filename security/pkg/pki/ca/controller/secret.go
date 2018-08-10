@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// TODO(myidpt): Move secret to security/pkg/k8s/.
+
 package controller
 
 import (
@@ -20,7 +22,6 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,8 +31,9 @@ import (
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 
-	"istio.io/istio/security/pkg/pki"
+	"istio.io/istio/pkg/log"
 	"istio.io/istio/security/pkg/pki/ca"
+	"istio.io/istio/security/pkg/pki/util"
 )
 
 /* #nosec: disable gas linter */
@@ -45,20 +47,51 @@ const (
 	PrivateKeyID = "key.pem"
 	// The ID/name for the CA root certificate file.
 	RootCertID = "root-cert.pem"
+	// The key to specify corresponding service account in the annotation of K8s secrets.
+	ServiceAccountNameAnnotationKey = "istio.io/service-account.name"
 
 	secretNamePrefix   = "istio."
 	secretResyncPeriod = time.Minute
 
-	serviceAccountNameAnnotationKey = "istio.io/service-account.name"
+	recommendedMinGracePeriodRatio = 0.2
+	recommendedMaxGracePeriodRatio = 0.8
 
 	// The size of a private key for a leaf certificate.
 	keySize = 2048
+
+	// The number of retries when requesting to create secret.
+	secretCreationRetry = 3
 )
+
+// DNSNameEntry stores the service name and namespace to construct the DNS id.
+// Service accounts matching the ServiceName and Namespace will have additional DNS SANs:
+// ServiceName.Namespace.svc, ServiceName.Namespace and optionall CustomDomain.
+// This is intended for control plane and trusted services.
+type DNSNameEntry struct {
+	// ServiceName is the name of the service account to match
+	ServiceName string
+
+	// Namespace restricts to a specific namespace.
+	Namespace string
+
+	// CustomDomain allows adding a user-defined domain.
+	CustomDomains []string
+}
 
 // SecretController manages the service accounts' secrets that contains Istio keys and certificates.
 type SecretController struct {
-	ca   ca.CertificateAuthority
-	core corev1.CoreV1Interface
+	ca             ca.CertificateAuthority
+	certTTL        time.Duration
+	core           corev1.CoreV1Interface
+	minGracePeriod time.Duration
+	// Length of the grace period for the certificate rotation.
+	gracePeriodRatio float32
+
+	// Whether the certificates are for CAs.
+	forCA bool
+
+	// DNS-enabled service account/service pair
+	dnsNames map[string]DNSNameEntry
 
 	// Controller and store for service account objects.
 	saController cache.Controller
@@ -67,15 +100,31 @@ type SecretController struct {
 	// Controller and store for secret objects.
 	scrtController cache.Controller
 	scrtStore      cache.Store
+
+	monitoring monitoringMetrics
 }
 
 // NewSecretController returns a pointer to a newly constructed SecretController instance.
-func NewSecretController(ca ca.CertificateAuthority, core corev1.CoreV1Interface,
-	namespace string) *SecretController {
+func NewSecretController(ca ca.CertificateAuthority, certTTL time.Duration, gracePeriodRatio float32, minGracePeriod time.Duration,
+	core corev1.CoreV1Interface, forCA bool, namespace string, dnsNames map[string]DNSNameEntry) (*SecretController, error) {
+
+	if gracePeriodRatio < 0 || gracePeriodRatio > 1 {
+		return nil, fmt.Errorf("grace period ratio %f should be within [0, 1]", gracePeriodRatio)
+	}
+	if gracePeriodRatio < recommendedMinGracePeriodRatio || gracePeriodRatio > recommendedMaxGracePeriodRatio {
+		log.Warnf("grace period ratio %f is out of the recommended window [%.2f, %.2f]",
+			gracePeriodRatio, recommendedMinGracePeriodRatio, recommendedMaxGracePeriodRatio)
+	}
 
 	c := &SecretController{
-		ca:   ca,
-		core: core,
+		ca:               ca,
+		certTTL:          certTTL,
+		gracePeriodRatio: gracePeriodRatio,
+		minGracePeriod:   minGracePeriod,
+		core:             core,
+		forCA:            forCA,
+		dnsNames:         dnsNames,
+		monitoring:       newMonitoringMetrics(),
 	}
 
 	saLW := &cache.ListWatch{
@@ -110,7 +159,7 @@ func NewSecretController(ca ca.CertificateAuthority, core corev1.CoreV1Interface
 			UpdateFunc: c.scrtUpdated,
 		})
 
-	return c
+	return c, nil
 }
 
 // Run starts the SecretController until a value is sent to stopCh.
@@ -119,16 +168,23 @@ func (sc *SecretController) Run(stopCh chan struct{}) {
 	go sc.saController.Run(stopCh)
 }
 
+// GetSecretName returns the secret name for a given service account name.
+func GetSecretName(saName string) string {
+	return secretNamePrefix + saName
+}
+
 // Handles the event where a service account is added.
 func (sc *SecretController) saAdded(obj interface{}) {
 	acct := obj.(*v1.ServiceAccount)
 	sc.upsertSecret(acct.GetName(), acct.GetNamespace())
+	sc.monitoring.ServiceAccountCreation.Inc()
 }
 
 // Handles the event where a service account is deleted.
 func (sc *SecretController) saDeleted(obj interface{}) {
 	acct := obj.(*v1.ServiceAccount)
 	sc.deleteSecret(acct.GetName(), acct.GetNamespace())
+	sc.monitoring.ServiceAccountDeletion.Inc()
 }
 
 // Handles the event where a service account is updated.
@@ -150,7 +206,7 @@ func (sc *SecretController) saUpdated(oldObj, curObj interface{}) {
 		sc.deleteSecret(oldName, oldNamespace)
 		sc.upsertSecret(curName, curNamespace)
 
-		glog.Infof("Service account \"%s\" in namespace \"%s\" has been updated to \"%s\" in namespace \"%s\"",
+		log.Infof("Service account \"%s\" in namespace \"%s\" has been updated to \"%s\" in namespace \"%s\"",
 			oldName, oldNamespace, curName, curNamespace)
 	}
 }
@@ -158,8 +214,8 @@ func (sc *SecretController) saUpdated(oldObj, curObj interface{}) {
 func (sc *SecretController) upsertSecret(saName, saNamespace string) {
 	secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{serviceAccountNameAnnotationKey: saName},
-			Name:        getSecretName(saName),
+			Annotations: map[string]string{ServiceAccountNameAnnotationKey: saName},
+			Name:        GetSecretName(saName),
 			Namespace:   saNamespace,
 		},
 		Type: IstioSecretType,
@@ -167,7 +223,7 @@ func (sc *SecretController) upsertSecret(saName, saNamespace string) {
 
 	_, exists, err := sc.scrtStore.Get(secret)
 	if err != nil {
-		glog.Errorf("Failed to get secret from the store (error %v)", err)
+		log.Errorf("Failed to get secret from the store (error %v)", err)
 	}
 
 	if exists {
@@ -178,67 +234,103 @@ func (sc *SecretController) upsertSecret(saName, saNamespace string) {
 	// Now we know the secret does not exist yet. So we create a new one.
 	chain, key, err := sc.generateKeyAndCert(saName, saNamespace)
 	if err != nil {
-		glog.Errorf("Failed to generate key and certificate for service account %q in namespace %q (error %v)",
+		log.Errorf("Failed to generate key and certificate for service account %q in namespace %q (error %v)",
 			saName, saNamespace, err)
 
 		return
 	}
-	rootCert := sc.ca.GetRootCertificate()
+	rootCert := sc.ca.GetCAKeyCertBundle().GetRootCertPem()
 	secret.Data = map[string][]byte{
 		CertChainID:  chain,
 		PrivateKeyID: key,
 		RootCertID:   rootCert,
 	}
-	_, err = sc.core.Secrets(saNamespace).Create(secret)
+
+	// We retry several times when create secret to mitigate transient network failures.
+	for i := 0; i < secretCreationRetry; i++ {
+		_, err = sc.core.Secrets(saNamespace).Create(secret)
+		if err == nil {
+			break
+		} else {
+			log.Errorf("Failed to create secret in attempt %v/%v, (error: %s)", i+1, secretCreationRetry, err)
+		}
+		time.Sleep(time.Second)
+	}
+
 	if err != nil {
-		glog.Errorf("Failed to create secret (error: %s)", err)
+		log.Errorf("Failed to create secret for service account \"%s\"  (error: %s), retries %v times",
+			saName, err, secretCreationRetry)
 		return
 	}
 
-	glog.Infof("Istio secret for service account \"%s\" in namespace \"%s\" has been created", saName, saNamespace)
+	log.Infof("Istio secret for service account \"%s\" in namespace \"%s\" has been created", saName, saNamespace)
 }
 
 func (sc *SecretController) deleteSecret(saName, saNamespace string) {
-	err := sc.core.Secrets(saNamespace).Delete(getSecretName(saName), nil)
+	err := sc.core.Secrets(saNamespace).Delete(GetSecretName(saName), nil)
 	// kube-apiserver returns NotFound error when the secret is successfully deleted.
 	if err == nil || errors.IsNotFound(err) {
-		glog.Infof("Istio secret for service account \"%s\" in namespace \"%s\" has been deleted", saName, saNamespace)
+		log.Infof("Istio secret for service account \"%s\" in namespace \"%s\" has been deleted", saName, saNamespace)
 		return
 	}
 
-	glog.Errorf("Failed to delete Istio secret for service account \"%s\" in namespace \"%s\" (error: %s)",
+	log.Errorf("Failed to delete Istio secret for service account \"%s\" in namespace \"%s\" (error: %s)",
 		saName, saNamespace, err)
 }
 
 func (sc *SecretController) scrtDeleted(obj interface{}) {
 	scrt, ok := obj.(*v1.Secret)
 	if !ok {
-		glog.Warning("Failed to convert to secret object: %v", obj)
+		log.Warnf("Failed to convert to secret object: %v", obj)
 		return
 	}
 
-	glog.Infof("Re-create deleted Istio secret")
-
-	saName := scrt.Annotations[serviceAccountNameAnnotationKey]
-	sc.upsertSecret(saName, scrt.GetNamespace())
+	saName := scrt.Annotations[ServiceAccountNameAnnotationKey]
+	if sa, _ := sc.core.ServiceAccounts(scrt.GetNamespace()).Get(saName, metav1.GetOptions{}); sa != nil {
+		log.Errorf("Re-create deleted Istio secret for existing service account.")
+		sc.upsertSecret(saName, scrt.GetNamespace())
+		sc.monitoring.SecretDeletion.Inc()
+	}
 }
 
 func (sc *SecretController) generateKeyAndCert(saName string, saNamespace string) ([]byte, []byte, error) {
-	id := fmt.Sprintf("%s://cluster.local/ns/%s/sa/%s", ca.URIScheme, saNamespace, saName)
-	options := ca.CertOptions{
+	id := fmt.Sprintf("%s://cluster.local/ns/%s/sa/%s", util.URIScheme, saNamespace, saName)
+	if sc.dnsNames != nil {
+		// Control plane components in same namespace.
+		if e, ok := sc.dnsNames[saName]; ok {
+			if e.Namespace == saNamespace {
+				// Example: istio-pilot.istio-system.svc, istio-pilot.istio-system
+				id += "," + fmt.Sprintf("%s.%s.svc", e.ServiceName, e.Namespace)
+				id += "," + fmt.Sprintf("%s.%s", e.ServiceName, e.Namespace)
+			}
+		}
+		// Custom overrides using CLI
+		if e, ok := sc.dnsNames[saName+"."+saName]; ok {
+			for _, d := range e.CustomDomains {
+				id += "," + d
+			}
+		}
+	}
+	options := util.CertOptions{
 		Host:       id,
 		RSAKeySize: keySize,
 	}
 
-	csrPEM, keyPEM, err := ca.GenCSR(options)
+	csrPEM, keyPEM, err := util.GenCSR(options)
 	if err != nil {
+		log.Errorf("CSR generation error (%v)", err)
+		sc.monitoring.CSRError.Inc()
 		return nil, nil, err
 	}
 
-	certPEM, err := sc.ca.Sign(csrPEM)
-	if err != nil {
-		return nil, nil, err
+	certChainPEM := sc.ca.GetCAKeyCertBundle().GetCertChainPem()
+	certPEM, signErr := sc.ca.Sign(csrPEM, sc.certTTL, sc.forCA)
+	if signErr != nil {
+		log.Errorf("CSR signing error (%v)", signErr.Error())
+		sc.monitoring.GetCertSignError(signErr.(*ca.Error).ErrorType()).Inc()
+		return nil, nil, fmt.Errorf("CSR signing error (%v)", signErr.(*ca.Error))
 	}
+	certPEM = append(certPEM, certChainPEM...)
 
 	return certPEM, keyPEM, nil
 }
@@ -246,38 +338,47 @@ func (sc *SecretController) generateKeyAndCert(saName string, saNamespace string
 func (sc *SecretController) scrtUpdated(oldObj, newObj interface{}) {
 	scrt, ok := newObj.(*v1.Secret)
 	if !ok {
-		glog.Warning("Failed to convert to secret object: %v", newObj)
+		log.Warnf("Failed to convert to secret object: %v", newObj)
 		return
 	}
 
 	certBytes := scrt.Data[CertChainID]
-	cert, err := pki.ParsePemEncodedCertificate(certBytes)
+	cert, err := util.ParsePemEncodedCertificate(certBytes)
 	if err != nil {
 		// TODO: we should refresh secret in this case since the secret contains an
 		// invalid cert.
-		glog.Error(err)
+		log.Errora(err)
 		return
 	}
 
-	ttl := time.Until(cert.NotAfter)
-	rootCertificate := sc.ca.GetRootCertificate()
+	certLifeTimeLeft := time.Until(cert.NotAfter)
+	certLifeTime := cert.NotAfter.Sub(cert.NotBefore)
+	// TODO(myidpt): we may introduce a minimum gracePeriod, without making the config too complex.
+	// Because time.Duration only takes int type, multiply gracePeriodRatio by 1000 and then divide it.
+	gracePeriod := time.Duration(sc.gracePeriodRatio*1000) * certLifeTime / 1000
+	if gracePeriod < sc.minGracePeriod {
+		log.Warnf("gracePeriod (%v * %f) = %v is less than minGracePeriod %v. Apply minGracePeriod.",
+			certLifeTime, sc.gracePeriodRatio, gracePeriod, sc.minGracePeriod)
+		gracePeriod = sc.minGracePeriod
+	}
+	rootCertificate := sc.ca.GetCAKeyCertBundle().GetRootCertPem()
 
 	// Refresh the secret if 1) the certificate contained in the secret is about
 	// to expire, or 2) the root certificate in the secret is different than the
 	// one held by the ca (this may happen when the CA is restarted and
 	// a new self-signed CA cert is generated).
-	if ttl.Seconds() < secretResyncPeriod.Seconds() || !bytes.Equal(rootCertificate, scrt.Data[RootCertID]) {
+	if certLifeTimeLeft < gracePeriod || !bytes.Equal(rootCertificate, scrt.Data[RootCertID]) {
 		namespace := scrt.GetNamespace()
 		name := scrt.GetName()
 
-		glog.Infof("Refreshing secret %s/%s, either the leaf certificate is about to expire "+
+		log.Infof("Refreshing secret %s/%s, either the leaf certificate is about to expire "+
 			"or the root certificate is outdated", namespace, name)
 
-		saName := scrt.Annotations[serviceAccountNameAnnotationKey]
+		saName := scrt.Annotations[ServiceAccountNameAnnotationKey]
 
 		chain, key, err := sc.generateKeyAndCert(saName, namespace)
 		if err != nil {
-			glog.Errorf("Failed to generate key and certificate for service account %q in namespace %q (error %v)",
+			log.Errorf("Failed to generate key and certificate for service account %q in namespace %q (error %v)",
 				saName, namespace, err)
 
 			return
@@ -288,11 +389,7 @@ func (sc *SecretController) scrtUpdated(oldObj, newObj interface{}) {
 		scrt.Data[RootCertID] = rootCertificate
 
 		if _, err = sc.core.Secrets(namespace).Update(scrt); err != nil {
-			glog.Errorf("Failed to update secret %s/%s (error: %s)", namespace, name, err)
+			log.Errorf("Failed to update secret %s/%s (error: %s)", namespace, name, err)
 		}
 	}
-}
-
-func getSecretName(saName string) string {
-	return secretNamePrefix + saName
 }

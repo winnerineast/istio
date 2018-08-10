@@ -23,16 +23,16 @@ import (
 	"text/tabwriter"
 	"time"
 
+	rpc "github.com/gogo/googleapis/google/rpc"
 	otgrpc "github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	ot "github.com/opentracing/opentracing-go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/status"
 
 	mixerpb "istio.io/api/mixer/v1"
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
 	"istio.io/istio/mixer/cmd/shared"
 	"istio.io/istio/mixer/pkg/attribute"
-	"istio.io/istio/mixer/pkg/tracing"
+	"istio.io/istio/pkg/tracing"
 )
 
 type clientState struct {
@@ -40,18 +40,19 @@ type clientState struct {
 	connection *grpc.ClientConn
 }
 
-func createAPIClient(port string, enableTracing bool) (*clientState, error) {
+func createAPIClient(port string, tracingOptions *tracing.Options) (*clientState, error) {
 	cs := clientState{}
 
 	var opts []grpc.DialOption
 	opts = append(opts, grpc.WithInsecure())
-	if enableTracing {
-		t, _, err := tracing.NewTracer("mixer-client", tracing.WithLogger())
+
+	if tracingOptions.TracingEnabled() {
+		_, err := tracing.Configure("mixer-client", tracingOptions)
 		if err != nil {
 			return nil, fmt.Errorf("could not build tracer: %v", err)
 		}
-		ot.InitGlobalTracer(t)
-		opts = append(opts, grpc.WithUnaryInterceptor(otgrpc.OpenTracingClientInterceptor(t)))
+		ot.InitGlobalTracer(ot.GlobalTracer())
+		opts = append(opts, grpc.WithUnaryInterceptor(otgrpc.OpenTracingClientInterceptor(ot.GlobalTracer())))
 	}
 
 	var err error
@@ -64,10 +65,6 @@ func createAPIClient(port string, enableTracing bool) (*clientState, error) {
 }
 
 func deleteAPIClient(cs *clientState) {
-	// TODO: This is to compensate for this bug: https://github.com/grpc/grpc-go/issues/1059
-	//       Remove this delay once that bug is fixed.
-	time.Sleep(50 * time.Millisecond)
-
 	_ = cs.connection.Close()
 	cs.client = nil
 	cs.connection = nil
@@ -246,6 +243,7 @@ func decodeStatus(status rpc.Status) string {
 	return result
 }
 
+// nolint:deadcode
 func dumpAttributes(printf, fatalf shared.FormatFn, attrs *mixerpb.CompressedAttributes) {
 	if attrs == nil {
 		return

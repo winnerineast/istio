@@ -4,6 +4,13 @@
 /*
 	Package config is a generated protocol buffer package.
 
+	The `denier` adapter is designed to always return a denial to precondition
+	checks. You can specify the exact error to return for these denials.
+
+	This adapter supports the [checknothing template](https://istio.io/docs/reference/config/policy-and-telemetry/templates/checknothing/),
+	the [listentry template](https://istio.io/docs/reference/config/policy-and-telemetry/templates/listentry/),
+	and the [quota template](https://istio.io/docs/reference/config/policy-and-telemetry/templates/quota/).
+
 	It is generated from these files:
 		mixer/adapter/denier/config/config.proto
 
@@ -17,11 +24,11 @@ import fmt "fmt"
 import math "math"
 import _ "github.com/gogo/protobuf/gogoproto"
 import _ "github.com/gogo/protobuf/types"
-import google_rpc "istio.io/gogo-genproto/googleapis/google/rpc"
+import google_rpc "github.com/gogo/googleapis/google/rpc"
 
 import time "time"
 
-import github_com_gogo_protobuf_types "github.com/gogo/protobuf/types"
+import types "github.com/gogo/protobuf/types"
 
 import strings "strings"
 import reflect "reflect"
@@ -40,6 +47,7 @@ var _ = time.Kitchen
 // proto package needs to be updated.
 const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
+// Configuration format for the Denier adapter.
 type Params struct {
 	// The error to return when denying a request.
 	Status google_rpc.Status `protobuf:"bytes,1,opt,name=status" json:"status"`
@@ -81,8 +89,8 @@ func (m *Params) MarshalTo(dAtA []byte) (int, error) {
 	i += n1
 	dAtA[i] = 0x12
 	i++
-	i = encodeVarintConfig(dAtA, i, uint64(github_com_gogo_protobuf_types.SizeOfStdDuration(m.ValidDuration)))
-	n2, err := github_com_gogo_protobuf_types.StdDurationMarshalTo(m.ValidDuration, dAtA[i:])
+	i = encodeVarintConfig(dAtA, i, uint64(types.SizeOfStdDuration(m.ValidDuration)))
+	n2, err := types.StdDurationMarshalTo(m.ValidDuration, dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -109,7 +117,7 @@ func (m *Params) Size() (n int) {
 	_ = l
 	l = m.Status.Size()
 	n += 1 + l + sovConfig(uint64(l))
-	l = github_com_gogo_protobuf_types.SizeOfStdDuration(m.ValidDuration)
+	l = types.SizeOfStdDuration(m.ValidDuration)
 	n += 1 + l + sovConfig(uint64(l))
 	if m.ValidUseCount != 0 {
 		n += 1 + sovConfig(uint64(m.ValidUseCount))
@@ -235,7 +243,7 @@ func (m *Params) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := github_com_gogo_protobuf_types.StdDurationUnmarshal(&m.ValidDuration, dAtA[iNdEx:postIndex]); err != nil {
+			if err := types.StdDurationUnmarshal(&m.ValidDuration, dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex

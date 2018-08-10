@@ -18,11 +18,10 @@ import (
 	"fmt"
 	"time"
 
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
+	rpc "github.com/gogo/googleapis/google/rpc"
+
 	"istio.io/istio/mixer/pkg/status"
 )
-
-// TODO revisit the comment on this adapter struct.
 
 // CheckResult provides return value from check request call on the handler.
 type CheckResult struct {
@@ -34,26 +33,9 @@ type CheckResult struct {
 	ValidUseCount int32
 }
 
-// GetStatus gets status embedded in the result.
-func (r *CheckResult) GetStatus() rpc.Status { return r.Status }
-
-// SetStatus embeds status in result.
-func (r *CheckResult) SetStatus(s rpc.Status) { r.Status = s }
-
-// Combine combines other result with self. It does not handle
-// Status.
-func (r *CheckResult) Combine(otherPtr interface{}) interface{} {
-	if otherPtr == nil {
-		return r
-	}
-	other := otherPtr.(*CheckResult)
-	if r.ValidDuration > other.ValidDuration {
-		r.ValidDuration = other.ValidDuration
-	}
-	if r.ValidUseCount > other.ValidUseCount {
-		r.ValidUseCount = other.ValidUseCount
-	}
-	return r
+// IsDefault returns true if the CheckResult is in its zero state
+func (r *CheckResult) IsDefault() bool {
+	return status.IsOK(r.Status) && r.ValidDuration == 0 && r.ValidUseCount == 0
 }
 
 func (r *CheckResult) String() string {

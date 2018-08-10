@@ -17,10 +17,9 @@ package na
 import (
 	"fmt"
 
-	"github.com/golang/glog"
-
+	"istio.io/istio/security/pkg/caclient/protocol"
 	"istio.io/istio/security/pkg/platform"
-	"istio.io/istio/security/pkg/workload"
+	"istio.io/istio/security/pkg/util"
 )
 
 // NodeAgent interface that should be implemented by
@@ -36,24 +35,23 @@ func NewNodeAgent(cfg *Config) (NodeAgent, error) {
 	}
 	na := &nodeAgentInternal{
 		config:   cfg,
-		certUtil: CertUtilImpl{},
+		certUtil: util.NewCertUtil(cfg.CAClientConfig.CSRGracePeriodPercentage),
 	}
 
-	if pc, err := platform.NewClient(cfg.Env, cfg.PlatformConfig, cfg.IstioCAAddress); err == nil {
-		na.pc = pc
-	} else {
+	pc, err := platform.NewClient(cfg.CAClientConfig.Env, cfg.CAClientConfig.RootCertFile, cfg.CAClientConfig.KeyFile,
+		cfg.CAClientConfig.CertChainFile, cfg.CAClientConfig.CAAddress)
+	if err != nil {
 		return nil, err
 	}
-
-	cAClient := &cAGrpcClientImpl{}
-	na.cAClient = cAClient
-
-	// TODO: Specify files for service identity cert/key instead of node agent files.
-	secretServer, err := workload.NewSecretServer(
-		workload.NewSecretFileServerConfig(cfg.PlatformConfig.OnPremConfig.CertChainFile, cfg.PlatformConfig.OnPremConfig.KeyFile))
+	na.pc = pc
+	dialOpts, err := pc.GetDialOptions()
 	if err != nil {
-		glog.Fatalf("Workload IO creation error: %v", err)
+		return nil, err
 	}
-	na.secretServer = secretServer
+	grpcConn, err := protocol.NewGrpcConnection(cfg.CAClientConfig.CAAddress, dialOpts)
+	if err != nil {
+		return nil, err
+	}
+	na.caProtocol = grpcConn
 	return na, nil
 }

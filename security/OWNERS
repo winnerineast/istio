@@ -1,11 +1,6 @@
-reviewers:
-  - wattli
-  - myidpt
-  - mangchiandjjoe
-  - wenchenglu
-  - crazytan
-  - lookuptable
 approvers:
-  - wattli
+  - diemtvu
+  - incfly
+  - mangchiandjjoe
   - myidpt
-  - wenchenglu
+  - wattli

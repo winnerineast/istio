@@ -19,20 +19,18 @@ import (
 )
 
 func TestInitializeConfig(t *testing.T) {
-	config := Config{}
+	config := NewConfig()
 
-	InitializeConfig(&config)
-
-	if config.CSRInitialRetrialInterval != defaultCSRInitialRetrialInterval {
-		t.Errorf("Unexpected config.CSRInitialRetrialInterval: %v", config.CSRInitialRetrialInterval)
+	if config.CAClientConfig.CSRInitialRetrialInterval != defaultCSRInitialRetrialInterval {
+		t.Errorf("Unexpected config.CSRInitialRetrialInterval: %v", config.CAClientConfig.CSRInitialRetrialInterval)
 	}
 
-	if config.CSRMaxRetries != defaultCSRMaxRetries {
-		t.Errorf("Unexpected config.CSRMaxRetries: %v", config.CSRMaxRetries)
+	if config.CAClientConfig.CSRMaxRetries != defaultCSRMaxRetries {
+		t.Errorf("Unexpected config.CSRMaxRetries: %v", config.CAClientConfig.CSRMaxRetries)
 	}
 
-	if config.CSRGracePeriodPercentage != defaultCSRGracePeriodPercentage {
-		t.Errorf("Unexpected config.CSRGracePeriodPercentage: %v", config.CSRGracePeriodPercentage)
+	if config.CAClientConfig.CSRGracePeriodPercentage != defaultCSRGracePeriodPercentage {
+		t.Errorf("Unexpected config.CSRGracePeriodPercentage: %v", config.CAClientConfig.CSRGracePeriodPercentage)
 	}
 
 }

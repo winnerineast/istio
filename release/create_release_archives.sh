@@ -26,6 +26,7 @@ set -x
 
 TEMP_DIR="$(mktemp -d /tmp/istio.version.XXXX)"
 BASE_DIR="$TEMP_DIR"
+ISTIOCTL_SUBDIR=istioctl
 OUTPUT_PATH=""
 VER_STRING=""
 
@@ -33,6 +34,7 @@ function usage() {
   echo "$0
     -d <path> path to use for temp directory                  (optional, randomized default is ${BASE_DIR} )
     -o <path> path where build output/artifacts are stored    (required)
+    -i <name> subdirectory in -o path to use for istioctl     (optional)
     -v <ver>  version info to include in filename (e.g., 1.0) (required)"
   exit 1
 }
@@ -40,12 +42,13 @@ function usage() {
 function error_exit() {
   # ${BASH_SOURCE[1]} is the file name of the caller.
   echo "${BASH_SOURCE[1]}: line ${BASH_LINENO[0]}: ${1:-Unknown Error.} (exit ${2:-1})" 1>&2
-  exit ${2:-1}
+  exit "${2:-1}"
 }
 
-while getopts d:o:v: arg ; do
+while getopts d:i:o:v: arg ; do
   case "${arg}" in
     d) BASE_DIR="${OPTARG}";;
+    i) ISTIOCTL_SUBDIR="${OPTARG}";;
     o) OUTPUT_PATH="${OPTARG}";;
     v) VER_STRING="${OPTARG}";;
     *) usage;;
@@ -61,19 +64,19 @@ BIN_DIR="${COMMON_FILES_DIR}/bin"
 mkdir -p "${BIN_DIR}"
 
 # On mac, brew install gnu-tar gnu-cp
-# and set CP=gcp TAR=gtar
+# and set CP="gcp" TAR="gtar"
 
 if [[ -z "${CP}" ]] ; then
-  CP=cp
+  CP="cp"
 fi
 if [[ -z "${TAR}" ]] ; then
-  TAR=tar
+  TAR="tar"
 fi
 
 function create_linux_archive() {
   local istioctl_path="${BIN_DIR}/istioctl"
 
-  ${CP} "${OUTPUT_PATH}/istioctl/istioctl-linux" "${istioctl_path}"
+  ${CP} "${OUTPUT_PATH}/${ISTIOCTL_SUBDIR}/istioctl-linux" "${istioctl_path}"
   chmod 755 "${istioctl_path}"
 
   ${TAR} --owner releng --group releng -czvf \
@@ -85,7 +88,7 @@ function create_linux_archive() {
 function create_osx_archive() {
   local istioctl_path="${BIN_DIR}/istioctl"
 
-  ${CP} "${OUTPUT_PATH}/istioctl/istioctl-osx" "${istioctl_path}"
+  ${CP} "${OUTPUT_PATH}/${ISTIOCTL_SUBDIR}/istioctl-osx" "${istioctl_path}"
   chmod 755 "${istioctl_path}"
 
   ${TAR} --owner releng --group releng -czvf \
@@ -97,19 +100,48 @@ function create_osx_archive() {
 function create_windows_archive() {
   local istioctl_path="${BIN_DIR}/istioctl.exe"
 
-  ${CP} "${OUTPUT_PATH}/istioctl/istioctl-win.exe" "${istioctl_path}"
-  
-  zip -r "${OUTPUT_PATH}/istio_${VER_STRING}_win.zip" "istio-${VER_STRING}" \
+  ${CP} "${OUTPUT_PATH}/${ISTIOCTL_SUBDIR}/istioctl-win.exe" "${istioctl_path}"
+
+  zip -r "${OUTPUT_PATH}/istio-${VER_STRING}-win.zip" "istio-${VER_STRING}" \
     || error_exit 'Could not create windows archive'
   rm "${istioctl_path}"
 }
 
 pushd "${OUTPUT_PATH}"
 ${CP} istio.VERSION LICENSE README.md "${COMMON_FILES_DIR}"/
-find samples install -type f \( -name "*.yaml" -o -name "cleanup*" -o -name "*.md" -o -name "kubeconfig" \) \
+find samples install -type f \( \
+  -name "*.yaml" \
+  -o -name "*.yml" \
+  -o -name "*.cfg" \
+  -o -name "*.j2" \
+  -o -name "cleanup*" \
+  -o -name "*.md" \
+  -o -name "*.conf" \
+  -o -name "*.pem" \
+  -o -name "*.tpl" \
+  -o -name "kubeconfig" \
+  -o -name "*.jinja*" \
+  -o -name "webhook-create-signed-cert.sh" \
+  -o -name "webhook-patch-ca-bundle.sh" \
+  \) \
   -exec ${CP} --parents {} "${COMMON_FILES_DIR}" \;
 find install/tools -type f -exec ${CP} --parents {} "${COMMON_FILES_DIR}" \;
+find tools -type f -not -name "githubContrib*" -not -name ".*" -exec ${CP} --parents {} "${COMMON_FILES_DIR}" \;
 popd
+
+for unwanted_manifest in \
+    istio-one-namespace.yaml \
+    istio-one-namespace-auth.yaml \
+    istio-multicluster.yaml \
+    istio-auth-multicluster.yaml \
+    istio.yaml \
+    addons/zipkin.yaml \
+    istio-auth.yaml \
+    istio-remote.yaml; do
+  rm -f "${COMMON_FILES_DIR}/install/kubernetes/${unwanted_manifest}"
+done
+
+ls -l  "${COMMON_FILES_DIR}/install/kubernetes/"
 
 # Changing dir such that tar and zip files are
 # created with right hiereachy
@@ -119,4 +151,4 @@ create_osx_archive
 create_windows_archive
 popd
 
-rm -rf $TEMP_DIR
+rm -rf "$TEMP_DIR"

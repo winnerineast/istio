@@ -15,38 +15,60 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/golang/glog"
 	"github.com/spf13/cobra"
+	"github.com/spf13/cobra/doc"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"istio.io/istio/pilot/cmd"
-	"istio.io/istio/pilot/cmd/pilot-discovery/server"
+	"istio.io/istio/pilot/pkg/bootstrap"
+	"istio.io/istio/pilot/pkg/serviceregistry"
+	"istio.io/istio/pkg/cmd"
+	"istio.io/istio/pkg/collateral"
+	"istio.io/istio/pkg/ctrlz"
+	"istio.io/istio/pkg/log"
+	"istio.io/istio/pkg/version"
 )
 
 var (
-	serverArgs server.PilotArgs
+	httpPort       int
+	monitoringPort int
+	serverArgs     bootstrap.PilotArgs
+
+	loggingOptions = log.DefaultOptions()
+
+	ctrlzOptions = ctrlz.DefaultOptions()
 
 	rootCmd = &cobra.Command{
-		Use:   "pilot",
-		Short: "Istio Pilot",
-		Long:  "Istio Pilot provides fleet-wide traffic management capabilities in the Istio Service Mesh.",
+		Use:          "pilot-discovery",
+		Short:        "Istio Pilot",
+		Long:         "Istio Pilot provides fleet-wide traffic management capabilities in the Istio Service Mesh.",
+		SilenceUsage: true,
 	}
 
 	discoveryCmd = &cobra.Command{
 		Use:   "discovery",
 		Short: "Start Istio proxy discovery service",
 		RunE: func(c *cobra.Command, args []string) error {
+			if err := log.Configure(loggingOptions); err != nil {
+				return err
+			}
 
 			// Create the stop channel for all of the servers.
 			stop := make(chan struct{})
 
+			// Apply deprecated flags if set to a value other than the default.
+			if serverArgs.DiscoveryOptions.HTTPAddr == ":8080" && httpPort != 8080 {
+				serverArgs.DiscoveryOptions.HTTPAddr = fmt.Sprintf(":%d", httpPort)
+			}
+			if serverArgs.DiscoveryOptions.MonitoringAddr == ":9093" && monitoringPort != 9093 {
+				serverArgs.DiscoveryOptions.MonitoringAddr = fmt.Sprintf(":%d", monitoringPort)
+			}
+
 			// Create the server for the discovery service.
-			discoveryServer, err := server.NewServer(serverArgs)
+			discoveryServer, err := bootstrap.NewServer(serverArgs)
 			if err != nil {
 				return fmt.Errorf("failed to create discovery service: %v", err)
 			}
@@ -64,27 +86,25 @@ var (
 )
 
 func init() {
-	cmd.AddFlags(rootCmd)
-
-	// hack to make flag.Parsed return true such that glog is happy
-	// about the flags having been parsed
-	fs := flag.NewFlagSet("", flag.ContinueOnError)
-	/* #nosec */
-	_ = fs.Parse([]string{})
-	flag.CommandLine = fs
-
 	discoveryCmd.PersistentFlags().StringSliceVar(&serverArgs.Service.Registries, "registries",
-		[]string{string(server.KubernetesRegistry)},
+		[]string{string(serviceregistry.KubernetesRegistry)},
 		fmt.Sprintf("Comma separated list of platform service registries to read from (choose one or more from {%s, %s, %s, %s, %s})",
-			server.KubernetesRegistry, server.ConsulRegistry, server.EurekaRegistry, server.CloudFoundryRegistry, server.MockRegistry))
+			serviceregistry.KubernetesRegistry, serviceregistry.ConsulRegistry,
+			serviceregistry.CloudFoundryRegistry, serviceregistry.MockRegistry, serviceregistry.ConfigRegistry))
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Config.CFConfig, "cfConfig", "",
 		"Cloud Foundry config file")
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Config.ClusterRegistriesConfigmap, "clusterRegistriesConfigMap", "",
+		"ConfigMap map for clusters config store")
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Config.ClusterRegistriesNamespace, "clusterRegistriesNamespace", "",
+		"Namespace for ConfigMap which stores clusters configs")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Config.KubeConfig, "kubeconfig", "",
 		"Use a Kubernetes configuration file instead of in-cluster configuration")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Mesh.ConfigFile, "meshConfig", "/etc/istio/config/mesh",
 		fmt.Sprintf("File name for Istio mesh configuration. If not specified, a default mesh will be used."))
 	discoveryCmd.PersistentFlags().StringVarP(&serverArgs.Namespace, "namespace", "n", "",
 		"Select a namespace where the controller resides. If not set, uses ${POD_NAMESPACE} environment variable")
+	discoveryCmd.PersistentFlags().StringSliceVar(&serverArgs.Plugins, "plugins", bootstrap.DefaultPlugins,
+		"comma separated list of networking plugins to enable")
 
 	// Config Controller options
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Config.FileDir, "configDir", "",
@@ -96,44 +116,58 @@ func init() {
 		"Controller resync interval")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Config.ControllerOptions.DomainSuffix, "domain", "cluster.local",
 		"DNS domain suffix")
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Service.Consul.ServerURL, "consulserverURL", "",
+		"URL for the Consul server")
+	discoveryCmd.PersistentFlags().DurationVar(&serverArgs.Service.Consul.Interval, "consulserverInterval", 2*time.Second,
+		"Interval (in seconds) for polling the Consul service registry")
 
-	discoveryCmd.PersistentFlags().IntVar(&serverArgs.DiscoveryOptions.Port, "port", 8080,
-		"Discovery service port")
-	discoveryCmd.PersistentFlags().IntVar(&serverArgs.DiscoveryOptions.MonitoringPort, "monitoringPort", 9093,
-		"HTTP port to use for the exposing pilot self-monitoring information")
+	// using address, so it can be configured as localhost:.. (possibly UDS in future)
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.DiscoveryOptions.HTTPAddr, "httpAddr", ":8080",
+		"Discovery service HTTP address")
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.DiscoveryOptions.GrpcAddr, "grpcAddr", ":15010",
+		"Discovery service grpc address")
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.DiscoveryOptions.SecureGrpcAddr, "secureGrpcAddr", ":15012",
+		"Discovery service grpc address, with https")
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.DiscoveryOptions.MonitoringAddr, "monitoringAddr", ":9093",
+		"HTTP address to use for the exposing pilot self-monitoring information")
 	discoveryCmd.PersistentFlags().BoolVar(&serverArgs.DiscoveryOptions.EnableProfiling, "profile", true,
 		"Enable profiling via web interface host:port/debug/pprof")
 	discoveryCmd.PersistentFlags().BoolVar(&serverArgs.DiscoveryOptions.EnableCaching, "discovery_cache", true,
 		"Enable caching discovery service responses")
+	// TODO (rshriram): Need v1/v2 endpoints and option to selectively
+	// enable webhook for specific xDS config (cds/lds/etc).
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.DiscoveryOptions.WebhookEndpoint, "webhookEndpoint", "",
+		"Webhook API endpoint (supports http://sockethost, and unix:///absolute/path/to/socket")
 
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Service.Consul.Config, "consulconfig", "",
-		"Consul Config file for discovery")
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Service.Consul.ServerURL, "consulserverURL", "",
-		"URL for the Consul server")
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Service.Eureka.ServerURL, "eurekaserverURL", "",
-		"URL for the Eureka server")
+	// Deprecated flags.
+	discoveryCmd.PersistentFlags().IntVar(&httpPort, "port", 8080,
+		"Discovery service port")
+	discoveryCmd.PersistentFlags().MarkDeprecated("port", "Use --httpAddr instead")
+	discoveryCmd.PersistentFlags().IntVar(&monitoringPort, "monitoringPort", 9093,
+		"HTTP port to use for the exposing pilot self-monitoring information")
+	discoveryCmd.PersistentFlags().MarkDeprecated("monitoringPort", "Use --monitoringAddr instead")
 
-	// Admission controller arguments.
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Admission.ExternalAdmissionWebhookName,
-		"admission-webhook-name", "pilot-webhook.istio.io", "Webhook name for Pilot admission controller")
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Admission.ServiceName,
-		"admission-service", "istio-pilot",
-		"Service name the admission controller uses during registration")
-	discoveryCmd.PersistentFlags().IntVar(&serverArgs.Admission.Port, "admission-service-port", 443,
-		"HTTPS port of the admission service. Must be 443 if service has more than one port ")
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Admission.SecretName, "admission-secret", "pilot-webhook",
-		"Name of k8s secret for pilot webhook certs")
-	discoveryCmd.PersistentFlags().DurationVar(&serverArgs.Admission.RegistrationDelay,
-		"admission-registration-delay", 0*time.Second,
-		"Time to delay webhook registration after starting webhook server")
+	// Attach the Istio logging options to the command.
+	loggingOptions.AttachCobraFlags(rootCmd)
+
+	// Attach the Istio Ctrlz options to the command.
+	ctrlzOptions.AttachCobraFlags(rootCmd)
+	serverArgs.CtrlZOptions = ctrlzOptions
+
+	cmd.AddFlags(rootCmd)
 
 	rootCmd.AddCommand(discoveryCmd)
-	rootCmd.AddCommand(cmd.VersionCmd)
+	rootCmd.AddCommand(version.CobraCommand())
+	rootCmd.AddCommand(collateral.CobraCommand(rootCmd, &doc.GenManHeader{
+		Title:   "Istio Pilot Discovery",
+		Section: "pilot-discovery CLI",
+		Manual:  "Istio Pilot Discovery",
+	}))
 }
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		glog.Error(err)
+		log.Errora(err)
 		os.Exit(-1)
 	}
 }

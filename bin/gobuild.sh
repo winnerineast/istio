@@ -15,31 +15,37 @@
 # limitations under the License.
 #
 # This script builds and link stamps the output
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-OUT=${1:?"output path"}
-VERSION_PACKAGE=${2:?"version go package"} # istio.io/istio/mixer/pkg/version
-BUILDPATH=${3:?"path to build"}
-
-set -e
 
 VERBOSE=${VERBOSE:-"0"}
 V=""
 if [[ "${VERBOSE}" == "1" ]];then
     V="-x"
+    set -x
 fi
 
-GOOS=${GOOS:-linux}
-GOARCH=${GOARCH:-amd64}
-GOBIN=${GOBIN:-go}
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+OUT=${1:?"output path"}
+BUILDPATH=${2:?"path to build"}
+
+set -e
+
+BUILD_GOOS=${GOOS:-linux}
+BUILD_GOARCH=${GOARCH:-amd64}
+GOBINARY=${GOBINARY:-go}
+GOPKG="$GOPATH/pkg"
 BUILDINFO=${BUILDINFO:-""}
 STATIC=${STATIC:-1}
 LDFLAGS="-extldflags -static"
+GOBUILDFLAGS=${GOBUILDFLAGS:-""}
+# Split GOBUILDFLAGS by spaces into an array called GOBUILDFLAGS_ARRAY.
+IFS=' ' read -r -a GOBUILDFLAGS_ARRAY <<< "$GOBUILDFLAGS"
+
+GCFLAGS=${GCFLAGS:-}
+export CGO_ENABLED=0
 
 if [[ "${STATIC}" !=  "1" ]];then
     LDFLAGS=""
-else
-    export CGO_ENABLED=0
 fi
 
 # gather buildinfo if not already provided
@@ -47,16 +53,18 @@ fi
 # at the beginning of the build and used throughout
 if [[ -z ${BUILDINFO} ]];then
     BUILDINFO=$(mktemp)
-    ${ROOT}/bin/get_workspace_status > ${BUILDINFO}
+    "${ROOT}/bin/get_workspace_status" > "${BUILDINFO}"
 fi
 
-# BUILD LD_VERSIONFLAGS
-LD_VERSIONFLAGS=""
-while read line; do
-    read SYMBOL VALUE < <(echo $line)
-    LD_VERSIONFLAGS=${LD_VERSIONFLAGS}" -X ${VERSION_PACKAGE}.${SYMBOL}=${VALUE}"
+# BUILD LD_EXTRAFLAGS
+LD_EXTRAFLAGS=""
+while read -r line; do
+    LD_EXTRAFLAGS="${LD_EXTRAFLAGS} -X ${line}"
 done < "${BUILDINFO}"
 
-# forgoing -i (incremental build) because it will be deprecated by tool chain. 
-GOOS=${GOOS} GOARCH=${GOARCH} ${GOBIN} build ${V} -o ${OUT} \
-	-ldflags "${LDFLAGS} ${LD_VERSIONFLAGS}" "${BUILDPATH}"
+# forgoing -i (incremental build) because it will be deprecated by tool chain.
+time GOOS=${BUILD_GOOS} GOARCH=${BUILD_GOARCH} ${GOBINARY} build \
+        ${V} "${GOBUILDFLAGS_ARRAY[@]}" ${GCFLAGS:+-gcflags "${GCFLAGS}"} \
+        -o "${OUT}" \
+        -pkgdir="${GOPKG}/${BUILD_GOOS}_${BUILD_GOARCH}" \
+        -ldflags "${LDFLAGS} ${LD_EXTRAFLAGS}" "${BUILDPATH}"

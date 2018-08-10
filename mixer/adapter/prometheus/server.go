@@ -27,10 +27,12 @@ import (
 )
 
 type (
-	server interface {
+	// Server presents prometheus server endpoint
+	Server interface {
 		io.Closer
 
 		Start(adapter.Env, http.Handler) error
+		Port() int
 	}
 
 	serverInst struct {
@@ -40,6 +42,8 @@ type (
 		srv     *http.Server
 		handler *metaHandler
 		refCnt  int
+
+		port int // port that this server instance is listening on
 	}
 )
 
@@ -70,6 +74,10 @@ func (m *metaHandler) setDelegate(delegate http.Handler) {
 	m.lock.Unlock()
 }
 
+func (s *serverInst) Port() int {
+	return s.port
+}
+
 // Start the prometheus singleton listener.
 func (s *serverInst) Start(env adapter.Env, metricsHandler http.Handler) (err error) {
 	s.lock.Lock()
@@ -88,12 +96,14 @@ func (s *serverInst) Start(env adapter.Env, metricsHandler http.Handler) (err er
 		return fmt.Errorf("could not start prometheus metrics server: %v", err)
 	}
 
+	s.port = listener.Addr().(*net.TCPAddr).Port
+
 	srvMux := http.NewServeMux()
 	s.handler = &metaHandler{delegate: metricsHandler}
 	srvMux.Handle(metricsPath, s.handler)
 	srv := &http.Server{Addr: s.addr, Handler: srvMux}
 	env.ScheduleDaemon(func() {
-		env.Logger().Infof("serving prometheus metrics on %s", s.addr)
+		env.Logger().Infof("serving prometheus metrics on %d", s.port)
 		if err := srv.Serve(listener.(*net.TCPListener)); err != nil {
 			if err == http.ErrServerClosed {
 				env.Logger().Infof("HTTP server stopped")

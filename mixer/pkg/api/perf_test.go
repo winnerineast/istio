@@ -22,47 +22,38 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/encoding/gzip" // register the gzip compressor
 
 	mixerpb "istio.io/api/mixer/v1"
 	"istio.io/istio/mixer/pkg/adapter"
-	"istio.io/istio/mixer/pkg/aspect"
 	"istio.io/istio/mixer/pkg/attribute"
 	"istio.io/istio/mixer/pkg/pool"
+	"istio.io/istio/mixer/pkg/runtime/dispatcher"
 	"istio.io/istio/mixer/pkg/status"
 )
 
 type benchState struct {
-	client       mixerpb.MixerClient
-	connection   *grpc.ClientConn
-	gs           *grpc.Server
-	gp           *pool.GoroutinePool
-	s            *grpcServer
-	delayOnClose bool
+	client     mixerpb.MixerClient
+	connection *grpc.ClientConn
+	gs         *grpc.Server
+	gp         *pool.GoroutinePool
+	s          *grpcServer
 }
 
-func (bs *benchState) createGRPCServer(grpcCompression bool) (string, error) {
+func (bs *benchState) createGRPCServer() (string, error) {
 	// get the network stuff setup
 	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
 		return "", err
 	}
 
-	var grpcOptions []grpc.ServerOption
-	grpcOptions = append(grpcOptions, grpc.MaxConcurrentStreams(256))
-	grpcOptions = append(grpcOptions, grpc.MaxMsgSize(1024*1024))
-
-	if grpcCompression {
-		grpcOptions = append(grpcOptions, grpc.RPCCompressor(grpc.NewGZIPCompressor()))
-		grpcOptions = append(grpcOptions, grpc.RPCDecompressor(grpc.NewGZIPDecompressor()))
-	}
-
 	// get everything wired up
-	bs.gs = grpc.NewServer(grpcOptions...)
+	bs.gs = grpc.NewServer(grpc.MaxConcurrentStreams(256), grpc.MaxMsgSize(1024*1024))
 
 	bs.gp = pool.NewGoroutinePool(32, false)
 	bs.gp.AddWorkers(32)
 
-	ms := NewGRPCServer(bs, bs.gp)
+	ms := NewGRPCServer(bs, bs.gp, nil)
 	bs.s = ms.(*grpcServer)
 	mixerpb.RegisterMixerServer(bs.gs, bs.s)
 
@@ -75,24 +66,15 @@ func (bs *benchState) createGRPCServer(grpcCompression bool) (string, error) {
 
 func (bs *benchState) deleteGRPCServer() {
 	bs.gs.GracefulStop()
-	bs.gp.Close()
+	_ = bs.gp.Close()
 }
 
-func (bs *benchState) createAPIClient(dial string, grpcCompression bool) error {
-	var opts []grpc.DialOption
-	opts = append(opts, grpc.WithInsecure())
-
-	if grpcCompression {
-		opts = append(opts, grpc.WithCompressor(grpc.NewGZIPCompressor()))
-		opts = append(opts, grpc.WithDecompressor(grpc.NewGZIPDecompressor()))
-	}
-
+func (bs *benchState) createAPIClient(dial string) error {
 	var err error
-	if bs.connection, err = grpc.Dial(dial, opts...); err != nil {
+	if bs.connection, err = grpc.Dial(dial, grpc.WithInsecure()); err != nil {
 		return err
 	}
 
-	bs.delayOnClose = true
 	bs.client = mixerpb.NewMixerClient(bs.connection)
 	return nil
 }
@@ -100,24 +82,18 @@ func (bs *benchState) createAPIClient(dial string, grpcCompression bool) error {
 func (bs *benchState) deleteAPIClient() {
 	_ = bs.connection.Close()
 
-	if bs.delayOnClose {
-		// TODO: This is to compensate for this bug: https://github.com/grpc/grpc-go/issues/1059
-		//       Remove this delay once that bug is fixed.
-		time.Sleep(100 * time.Millisecond)
-	}
-
 	bs.client = nil
 	bs.connection = nil
 }
 
-func prepBenchState(grpcCompression bool) (*benchState, error) {
+func prepBenchState() (*benchState, error) {
 	bs := &benchState{}
-	dial, err := bs.createGRPCServer(grpcCompression)
+	dial, err := bs.createGRPCServer()
 	if err != nil {
 		return nil, err
 	}
 
-	if err = bs.createAPIClient(dial, grpcCompression); err != nil {
+	if err = bs.createAPIClient(dial); err != nil {
 		bs.deleteGRPCServer()
 		return nil, err
 	}
@@ -134,21 +110,32 @@ func (bs *benchState) Preprocess(ctx context.Context, requestBag attribute.Bag, 
 	return nil
 }
 
-func (bs *benchState) Check(ctx context.Context, bag attribute.Bag) (*adapter.CheckResult, error) {
-	result := &adapter.CheckResult{
+func (bs *benchState) Check(ctx context.Context, bag attribute.Bag) (adapter.CheckResult, error) {
+	result := adapter.CheckResult{
 		Status: status.OK,
 	}
 	return result, nil
 }
 
-func (bs *benchState) Report(_ context.Context, _ attribute.Bag) error {
+func (bs *benchState) GetReporter(ctx context.Context) dispatcher.Reporter {
+	return bs
+}
+
+func (bs *benchState) Report(bag attribute.Bag) error {
 	return nil
 }
 
-func (bs *benchState) Quota(ctx context.Context, requestBag attribute.Bag,
-	qma *aspect.QuotaMethodArgs) (*adapter.QuotaResult, error) {
+func (bs *benchState) Flush() error {
+	return nil
+}
 
-	qr := &adapter.QuotaResult{
+func (bs *benchState) Done() {
+}
+
+func (bs *benchState) Quota(ctx context.Context, requestBag attribute.Bag,
+	qma dispatcher.QuotaMethodArgs) (adapter.QuotaResult, error) {
+
+	qr := adapter.QuotaResult{
 		Status: status.OK,
 		Amount: 42,
 	}
@@ -172,7 +159,7 @@ func BenchmarkAPI_Unary_NoGlobalDict_Compress(b *testing.B) {
 }
 
 func unaryBench(b *testing.B, grpcCompression, useGlobalDict bool) {
-	bs, err := prepBenchState(grpcCompression)
+	bs, err := prepBenchState()
 	if err != nil {
 		b.Fatalf("unable to prep test state %v", err)
 	}
@@ -191,6 +178,11 @@ func unaryBench(b *testing.B, grpcCompression, useGlobalDict bool) {
 	gp := pool.NewGoroutinePool(32, false)
 	gp.AddWorkers(32)
 
+	var opts []grpc.CallOption
+	if grpcCompression {
+		opts = append(opts, grpc.UseCompressor("gzip"))
+	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		uuid[4] = byte(i)
@@ -205,12 +197,12 @@ func unaryBench(b *testing.B, grpcCompression, useGlobalDict bool) {
 		}
 
 		wg.Add(1)
-		gp.ScheduleWork(func() {
-			if _, err := bs.client.Check(context.Background(), request); err != nil {
+		gp.ScheduleWork(func(_ interface{}) {
+			if _, err := bs.client.Check(context.Background(), request, opts...); err != nil {
 				b.Errorf("Check2 failed with %v", err)
 			}
 			wg.Done()
-		})
+		}, nil)
 	}
 
 	// wait for all the async work to be done
@@ -245,8 +237,8 @@ func getGlobalDict() []string {
 		"response.time",
 		"source.namespace",
 		"source.uid",
-		"target.namespace",
-		"target.uid",
+		"destination.namespace",
+		"destination.uid",
 	}
 }
 
@@ -279,6 +271,6 @@ func setRequestAttrs(bag *attribute.MutableBag, uuid []byte) {
 	bag.Set("response.time", time.Now())
 	bag.Set("source.namespace", "XYZ11")
 	bag.Set("source.uid", "POD11")
-	bag.Set("target.namespace", "XYZ222")
-	bag.Set("target.uid", "POD222")
+	bag.Set("destination.namespace", "XYZ222")
+	bag.Set("destination.uid", "POD222")
 }

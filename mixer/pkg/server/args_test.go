@@ -19,7 +19,7 @@ import (
 )
 
 func TestValidation(t *testing.T) {
-	a := NewArgs()
+	a := DefaultArgs()
 
 	if err := a.validate(); err != nil {
 		t.Errorf("Expecting to validate but failed with: %v", err)
@@ -30,49 +30,23 @@ func TestValidation(t *testing.T) {
 		t.Errorf("Got unexpected success")
 	}
 
-	a = NewArgs()
+	a = DefaultArgs()
 	a.APIWorkerPoolSize = -1
 	if err := a.validate(); err == nil {
 		t.Errorf("Got unexpected success")
 	}
 
-	a = NewArgs()
-	a.ExpressionEvalCacheSize = -1
+	a = DefaultArgs()
+	a.NumCheckCacheEntries = -1
 	if err := a.validate(); err == nil {
 		t.Errorf("Got unexpected success")
 	}
 }
 
 func TestString(t *testing.T) {
-	a := NewArgs()
+	a := DefaultArgs()
 
 	// just make sure this doesn't crash
 	s := a.String()
 	t.Log(s)
-}
-
-func TestEnableTracing(t *testing.T) {
-	a := NewArgs()
-
-	if a.EnableTracing() {
-		t.Fatal("default arg values should not have enabled tracing")
-	}
-
-	a = NewArgs()
-	a.LogTraceSpans = true
-	if !a.EnableTracing() {
-		t.Fatal("logTraceSpans should have trigged tracing")
-	}
-
-	a = NewArgs()
-	a.ZipkinURL = "http://foo.bar.com"
-	if !a.EnableTracing() {
-		t.Fatal("zipkinURL should have trigged tracing")
-	}
-
-	a = NewArgs()
-	a.JaegerURL = "http://foo.bar.com"
-	if !a.EnableTracing() {
-		t.Fatal("jaegerURL should have trigged tracing")
-	}
 }

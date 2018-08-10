@@ -14,20 +14,17 @@
 
 syntax = "proto3";
 
-package listEntry;
+// $title: List Entry
+// $description: A template designed to let you perform list checking operations.
+// $location: https://istio.io/docs/reference/config/policy-and-telemetry/templates/listentry.html
+// $aliases:
+// $  - /docs/reference/config/template/listentry.html
 
-import "mixer/v1/template/extensions.proto";
-
-option (istio.mixer.v1.template.template_variety) = TEMPLATE_VARIETY_CHECK;
-
-// ListEntry is used to verify the presence/absence of a string
-// within a list.
-//
-// When writing the configuration, the value for the fields associated with this template can either be a
-// literal or an [expression](https://istio.io/docs/reference/config/mixer/expression-language.html). Please note that if the datatype of a field is not istio.mixer.v1.config.descriptor.ValueType,
-// then the expression's [inferred type](https://istio.io/docs/reference/config/mixer/expression-language.html#type-checking) must match the datatype of the field.
+// The `listentry` template is designed to let you perform list check operations
+// with the [list](https://istio.io/docs/reference/config/policy-and-telemetry/adapters/list/) adapter.
 //
 // Example config:
+//
 // ```
 // apiVersion: "config.istio.io/v1alpha2"
 // kind: listentry
@@ -37,6 +34,18 @@ option (istio.mixer.v1.template.template_variety) = TEMPLATE_VARIETY_CHECK;
 // spec:
 //   value: source.labels["version"]
 // ```
+package listEntry;
+
+import "mixer/adapter/model/v1beta1/extensions.proto";
+
+option (istio.mixer.adapter.model.v1beta1.template_variety) = TEMPLATE_VARIETY_CHECK;
+
+// The `listentry` template is used to verify the presence/absence of a string
+// within a list.
+//
+// When writing the configuration, the value for the fields associated with this template can either be a
+// literal or an [expression](https://istio.io/docs/reference//config/policy-and-telemetry/expression-language/). Please note that if the datatype of a field is not istio.policy.v1beta1.Value,
+// then the expression's [inferred type](https://istio.io/docs/reference//config/policy-and-telemetry/expression-language/#type-checking) must match the datatype of the field.
 message Template {
     // Specifies the entry to verify in the list.
     string value = 1;

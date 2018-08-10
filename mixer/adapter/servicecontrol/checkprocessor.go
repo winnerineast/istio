@@ -21,15 +21,15 @@ import (
 	"math"
 	"time"
 
+	rpc "github.com/gogo/googleapis/google/rpc"
 	"github.com/pborman/uuid"
 	sc "google.golang.org/api/servicecontrol/v1"
 
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
 	"istio.io/istio/mixer/adapter/servicecontrol/config"
 	"istio.io/istio/mixer/pkg/adapter"
-	"istio.io/istio/mixer/pkg/cache"
 	"istio.io/istio/mixer/pkg/status"
 	"istio.io/istio/mixer/template/apikey"
+	"istio.io/istio/pkg/cache"
 )
 
 // checkImpl implements checkProcessor interface, handles doCheck call to Google ServiceControl backend.
@@ -105,9 +105,9 @@ func (c *checkImpl) doCheck(consumerID, operationName string, timestamp time.Tim
 		},
 	}
 
-	if c.env.Logger().VerbosityLevel(logDebug) {
+	if c.env.Logger().DebugEnabled() {
 		if requestDetail, err := toFormattedJSON(request); err == nil {
-			c.env.Logger().Infof("request: %v", string(requestDetail))
+			c.env.Logger().Debugf("request: %v", requestDetail)
 		}
 	}
 
@@ -116,9 +116,9 @@ func (c *checkImpl) doCheck(consumerID, operationName string, timestamp time.Tim
 		return nil, err
 	}
 
-	if c.env.Logger().VerbosityLevel(logDebug) {
+	if c.env.Logger().DebugEnabled() {
 		if responseDetail, err := toFormattedJSON(response); err == nil {
-			c.env.Logger().Infof("response: %v", string(responseDetail))
+			c.env.Logger().Debugf("response: %v", responseDetail)
 		}
 	}
 
@@ -132,14 +132,13 @@ func (c *checkImpl) responseToCheckResult(response *sc.CheckResponse) (adapter.C
 
 	if response.ServerResponse.HTTPStatusCode != 200 {
 		code := toRPCCode(response.ServerResponse.HTTPStatusCode)
-		result.SetStatus(status.New(code))
+		result.Status = status.New(code)
 	}
 
 	if len(response.CheckErrors) > 0 {
 		checkError := response.CheckErrors[0]
-		result.SetStatus(
-			status.WithMessage(serviceControlErrorToRPCCode(checkError.Code),
-				fmt.Sprintf("%s: %s", checkError.Code, checkError.Detail)))
+		result.Status = status.WithMessage(serviceControlErrorToRPCCode(checkError.Code),
+			fmt.Sprintf("%s: %s", checkError.Code, checkError.Detail))
 	}
 
 	return result, nil

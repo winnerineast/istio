@@ -18,26 +18,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/ghodss/yaml"
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/protobuf/ptypes/empty"
 
-	pb "istio.io/api/mixer/v1/config/descriptor"
-	adpTmpl "istio.io/api/mixer/v1/template"
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
+	adpTmpl "istio.io/api/mixer/adapter/model/v1beta1"
+	istio_mixer_v1_config "istio.io/api/policy/v1beta1"
+	pb "istio.io/api/policy/v1beta1"
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/pkg/attribute"
-	"istio.io/istio/mixer/pkg/config/proto"
-	"istio.io/istio/mixer/pkg/expr"
-	"istio.io/istio/mixer/pkg/il/evaluator"
-	istio_mixer_adapter_sample_myapa "istio.io/istio/mixer/template/sample/apa"
+	"istio.io/istio/mixer/pkg/lang/ast"
+	"istio.io/istio/mixer/pkg/lang/checker"
+	"istio.io/istio/mixer/template/sample/apa"
 	sample_check "istio.io/istio/mixer/template/sample/check"
 	sample_quota "istio.io/istio/mixer/template/sample/quota"
 	sample_report "istio.io/istio/mixer/template/sample/report"
@@ -78,7 +75,6 @@ type fakeMyApaHandler struct {
 	adapter.Handler
 	retOutput     *istio_mixer_adapter_sample_myapa.Output
 	retError      error
-	cnfgCallInput interface{}
 	procCallInput interface{}
 }
 
@@ -144,7 +140,7 @@ type fakeBag struct{}
 func (f fakeBag) Get(name string) (value interface{}, found bool) { return nil, false }
 func (f fakeBag) Names() []string                                 { return []string{} }
 func (f fakeBag) Done()                                           {}
-func (f fakeBag) DebugString() string                             { return "" }
+func (f fakeBag) String() string                                  { return "" }
 
 func TestGeneratedFields(t *testing.T) {
 	for _, tst := range []struct {
@@ -304,6 +300,9 @@ type inferTypeTest struct {
 
 func getExprEvalFunc(err error) func(string) (pb.ValueType, error) {
 	return func(expr string) (pb.ValueType, error) {
+		if err != nil {
+			return pb.VALUE_TYPE_UNSPECIFIED, err
+		}
 		expr = strings.ToLower(expr)
 		retType := pb.VALUE_TYPE_UNSPECIFIED
 		if strings.HasSuffix(expr, "string") {
@@ -326,8 +325,8 @@ func getExprEvalFunc(err error) func(string) (pb.ValueType, error) {
 		}
 
 		if retType == pb.VALUE_TYPE_UNSPECIFIED {
-			tc := evaluator.NewTypeChecker()
-			retType, _ = tc.EvalType(expr, createAttributeDescriptorFinder(nil))
+			tc := checker.NewTypeChecker()
+			retType, err = tc.EvalType(expr, createAttributeDescriptorFinder(nil))
 		}
 		return retType, err
 	}
@@ -341,7 +340,6 @@ func TestInferTypeForSampleReport(t *testing.T) {
 value: source.int64
 int64Primitive: source.int64
 boolPrimitive: source.bool
-doublePrimitive: source.double
 stringPrimitive: source.string
 timeStamp: source.timestamp
 duration: source.duration
@@ -411,49 +409,59 @@ res1:
 			},
 		},
 		{
-			name: "MissingAField",
+			name: "MissingAFieldValid",
 			instYamlCfg: `
-value: source.int64
+# value: source.int64 # missing ValueType field
 # int64Primitive: source.int64 # missing int64Primitive
-boolPrimitive: source.bool
+# boolPrimitive: source.bool # missing int64Primitive
 doublePrimitive: source.double
 stringPrimitive: source.string
 timeStamp: source.timestamp
 duration: source.duration
-dimensions:
-  source: source.string
-  target: source.string
-`,
-			cstrParam:     &sample_report.InstanceParam{},
-			typeEvalError: nil,
-			wantErr:       "expression for field 'Int64Primitive' cannot be empty",
-			willPanic:     false,
-		},
-		{
-			name: "MissingAFieldSubMsg",
-			instYamlCfg: `
-value: source.int64
-int64Primitive: source.int64
-boolPrimitive: source.bool
-doublePrimitive: source.double
-stringPrimitive: source.string
-timeStamp: source.timestamp
-duration: source.duration
-dimensions:
-  source: source.string
-  target: source.string
+#dimensions: # missing int64Primitive
+#  source: source.string
+#  target: source.string
 res1:
-  value: source.int64
+  # value: source.int64 # missing ValueType field
   # int64Primitive: source.int64 # missing int64Primitive
   boolPrimitive: source.bool
-  doublePrimitive: source.double
-  stringPrimitive: source.string
-  timeStamp: source.timestamp
-  duration: source.duration
+  # doublePrimitive: source.double
+  # stringPrimitive: source.string
+  # timeStamp: source.timestamp
+  # duration: source.duration
 `,
 			cstrParam:     &sample_report.InstanceParam{},
 			typeEvalError: nil,
-			wantErr:       "expression for field 'Res1.Int64Primitive' cannot be empty",
+			wantErr:       "",
+			willPanic:     false,
+			wantType: &sample_report.Type{
+				Value:      pb.VALUE_TYPE_UNSPECIFIED,
+				Dimensions: map[string]pb.ValueType{},
+				Res1: &sample_report.Res1Type{
+					Value:      pb.VALUE_TYPE_UNSPECIFIED,
+					Dimensions: map[string]pb.ValueType{},
+					Res2:       nil,
+					Res2Map:    map[string]*sample_report.Res2Type{},
+				},
+			},
+		},
+		{
+			name: "NotValidMissingExpressionInMap",
+			instYamlCfg: `
+# value: source.int64 # missing ValueType field
+# int64Primitive: source.int64 # missing int64Primitive
+# boolPrimitive: source.bool # missing boolPrimitive
+doublePrimitive: source.double
+stringPrimitive: source.string
+timeStamp: source.timestamp
+duration: source.duration
+dimensions:
+# bad expression below.
+  source:
+`,
+			cstrParam:     &sample_report.InstanceParam{},
+			typeEvalError: nil,
+			wantErr:       "failed to evaluate expression for field 'Dimensions[source]'",
 			willPanic:     false,
 		},
 		{
@@ -671,7 +679,7 @@ duration: source.duration
 dimensions:
   source: source.string
   target: source.string
-  env: target.string
+  env: destination.string
 res1:
   value: source.int64
   int64Primitive: source.int64
@@ -683,7 +691,7 @@ res1:
   dimensions:
     source: source.string
     target: source.string
-    env: target.string
+    env: destination.string
 `,
 			cstrParam: &sample_quota.InstanceParam{},
 			wantType: &sample_quota.Type{
@@ -808,91 +816,63 @@ func newFakeExpr(extraAttrManifest []*istio_mixer_v1_config.AttributeManifest) *
 	return &fakeExpr{extraAttrManifest: extraAttrManifest}
 }
 
-// Eval evaluates given expression using the attribute bag
 func (e *fakeExpr) Eval(mapExpression string, attrs attribute.Bag) (interface{}, error) {
-	expr2 := mapExpression
-
-	if strings.HasSuffix(expr2, "string") {
-		return "", nil
-	}
-	if strings.HasSuffix(expr2, "double") {
-		return 1.1, nil
-	}
-	if strings.HasSuffix(expr2, "bool") {
-		return true, nil
-	}
-	if strings.HasSuffix(expr2, "int64") {
-		return int64(1234), nil
-	}
-	if strings.HasSuffix(expr2, "duration") {
-		return 10 * time.Second, nil
-	}
-	if strings.HasSuffix(expr2, "source.email") {
-		return "foo@bar.com", nil
-	}
-	if strings.HasSuffix(expr2, "timestamp") {
-		return time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC), nil
-	}
-	ev, _ := evaluator.NewILEvaluator(1024)
-	ev.ChangeVocabulary(createAttributeDescriptorFinder(e.extraAttrManifest))
-	return ev.Eval(expr2, attrs)
+	return nil, nil
 }
 
-var baseConfig = istio_mixer_v1_config.GlobalConfig{
-	Manifests: []*istio_mixer_v1_config.AttributeManifest{
-		{
-			Attributes: map[string]*istio_mixer_v1_config.AttributeManifest_AttributeInfo{
-				"str.absent": {
-					ValueType: pb.STRING,
-				},
-				"bool.absent": {
-					ValueType: pb.BOOL,
-				},
-				"double.absent": {
-					ValueType: pb.DOUBLE,
-				},
-				"int64.absent": {
-					ValueType: pb.INT64,
-				},
-				"source.int64": {
-					ValueType: pb.INT64,
-				},
-				"source.bool": {
-					ValueType: pb.BOOL,
-				},
-				"source.double": {
-					ValueType: pb.DOUBLE,
-				},
-				"source.string": {
-					ValueType: pb.STRING,
-				},
-				"source.timestamp": {
-					ValueType: pb.TIMESTAMP,
-				},
-				"source.duration": {
-					ValueType: pb.DURATION,
-				},
-				"source.ip": {
-					ValueType: pb.IP_ADDRESS,
-				},
-				"source.email": {
-					ValueType: pb.EMAIL_ADDRESS,
-				},
-				"source.uri": {
-					ValueType: pb.URI,
-				},
-				"source.labels": {
-					ValueType: pb.STRING_MAP,
-				},
-				"source.dns": {
-					ValueType: pb.DNS_NAME,
-				},
+var baseManifests = []*istio_mixer_v1_config.AttributeManifest{
+	{
+		Attributes: map[string]*istio_mixer_v1_config.AttributeManifest_AttributeInfo{
+			"str.absent": {
+				ValueType: pb.STRING,
+			},
+			"bool.absent": {
+				ValueType: pb.BOOL,
+			},
+			"double.absent": {
+				ValueType: pb.DOUBLE,
+			},
+			"int64.absent": {
+				ValueType: pb.INT64,
+			},
+			"source.int64": {
+				ValueType: pb.INT64,
+			},
+			"source.bool": {
+				ValueType: pb.BOOL,
+			},
+			"source.double": {
+				ValueType: pb.DOUBLE,
+			},
+			"source.string": {
+				ValueType: pb.STRING,
+			},
+			"source.timestamp": {
+				ValueType: pb.TIMESTAMP,
+			},
+			"source.duration": {
+				ValueType: pb.DURATION,
+			},
+			"source.ip": {
+				ValueType: pb.IP_ADDRESS,
+			},
+			"source.email": {
+				ValueType: pb.EMAIL_ADDRESS,
+			},
+			"source.uri": {
+				ValueType: pb.URI,
+			},
+			"source.labels": {
+				ValueType: pb.STRING_MAP,
+			},
+			"source.dns": {
+				ValueType: pb.DNS_NAME,
 			},
 		},
 	},
 }
 
-// attributeFinder exposes expr.AttributeDescriptorFinder
+// attributeFinder exposes ast.AttributeDescriptorFinder
 type attributeFinder struct {
 	attrs map[string]*istio_mixer_v1_config.AttributeManifest_AttributeInfo
 }
@@ -903,9 +883,9 @@ func (a attributeFinder) GetAttribute(name string) *istio_mixer_v1_config.Attrib
 	return a.attrs[name]
 }
 
-func createAttributeDescriptorFinder(extraAttrManifest []*istio_mixer_v1_config.AttributeManifest) expr.AttributeDescriptorFinder {
+func createAttributeDescriptorFinder(extraAttrManifest []*istio_mixer_v1_config.AttributeManifest) ast.AttributeDescriptorFinder {
 	attrs := make(map[string]*istio_mixer_v1_config.AttributeManifest_AttributeInfo)
-	for _, m := range baseConfig.Manifests {
+	for _, m := range baseManifests {
 		for an, at := range m.Attributes {
 			attrs[an] = at
 		}
@@ -923,556 +903,17 @@ func (e *fakeExpr) EvalPredicate(mapExpression string, attrs attribute.Bag) (boo
 	return true, nil
 }
 
-func (e *fakeExpr) EvalType(s string, af expr.AttributeDescriptorFinder) (pb.ValueType, error) {
+func (e *fakeExpr) EvalType(s string, af ast.AttributeDescriptorFinder) (pb.ValueType, error) {
 	//return pb.VALUE_TYPE_UNSPECIFIED, nil
 	if i := af.GetAttribute(s); i != nil {
 		return i.ValueType, nil
 	}
-	tc := evaluator.NewTypeChecker()
+	tc := checker.NewTypeChecker()
 	return tc.EvalType(s, af)
 }
 
-func (e *fakeExpr) AssertType(string, expr.AttributeDescriptorFinder, pb.ValueType) error {
+func (e *fakeExpr) AssertType(string, ast.AttributeDescriptorFinder, pb.ValueType) error {
 	return nil
-}
-
-func TestProcessReport(t *testing.T) {
-	for _, tst := range []struct {
-		name         string
-		insts        map[string]proto.Message
-		hdlr         adapter.Handler
-		wantInstance interface{}
-		wantError    string
-	}{
-		{
-			name: " Valid",
-			insts: map[string]proto.Message{
-				"foo": &sample_report.InstanceParam{
-					Value:           "1",
-					Dimensions:      map[string]string{"s": "2"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-					Res1: &sample_report.Res1InstanceParam{
-						Value:           "1",
-						Dimensions:      map[string]string{"s": "2"},
-						BoolPrimitive:   "true",
-						DoublePrimitive: "1.2",
-						Int64Primitive:  "54362",
-						StringPrimitive: `"mystring"`,
-						Int64Map:        map[string]string{"a": "1"},
-						TimeStamp:       "request.timestamp",
-						Duration:        "request.duration",
-						Res2: &sample_report.Res2InstanceParam{
-							Value:          "1",
-							Dimensions:     map[string]string{"s": "2"},
-							Int64Primitive: "54362",
-							DnsName:        `"myDNS"`,
-							Duration:       "request.duration",
-							EmailAddr:      `"myEMAIL"`,
-							IpAddr:         `ip("0.0.0.0")`,
-							TimeStamp:      "request.timestamp",
-							Uri:            `"myURI"`,
-						},
-						Res2Map: map[string]*sample_report.Res2InstanceParam{
-							"foo": {
-								Value:          "1",
-								Dimensions:     map[string]string{"s": "2"},
-								Int64Primitive: "54362",
-								DnsName:        `"myDNS"`,
-								Duration:       "request.duration",
-								EmailAddr:      `"myEMAIL"`,
-								IpAddr:         `ip("0.0.0.0")`,
-								TimeStamp:      "request.timestamp",
-								Uri:            `"myURI"`,
-							},
-						},
-					},
-				},
-				"bar": &sample_report.InstanceParam{
-					Value:           "2",
-					Dimensions:      map[string]string{"k": "3"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"b": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-				},
-			},
-			hdlr: &fakeReportHandler{},
-			wantInstance: []*sample_report.Instance{
-				{
-					Name:            "foo",
-					Value:           int64(1),
-					Dimensions:      map[string]interface{}{"s": int64(2)},
-					BoolPrimitive:   true,
-					DoublePrimitive: 1.2,
-					Int64Primitive:  54362,
-					StringPrimitive: "mystring",
-					Int64Map:        map[string]int64{"a": int64(1)},
-					TimeStamp:       time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-					Duration:        10 * time.Second,
-					Res1: &sample_report.Res1{
-						Value:           int64(1),
-						Dimensions:      map[string]interface{}{"s": int64(2)},
-						BoolPrimitive:   true,
-						DoublePrimitive: 1.2,
-						Int64Primitive:  54362,
-						StringPrimitive: "mystring",
-						Int64Map:        map[string]int64{"a": int64(1)},
-						TimeStamp:       time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-						Duration:        10 * time.Second,
-						Res2: &sample_report.Res2{
-							Value:          int64(1),
-							Dimensions:     map[string]interface{}{"s": int64(2)},
-							Int64Primitive: 54362,
-							DnsName:        adapter.DNSName("myDNS"),
-							Duration:       10 * time.Second,
-							EmailAddr:      adapter.EmailAddress("myEMAIL"),
-							IpAddr:         net.ParseIP("0.0.0.0"),
-							TimeStamp:      time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-							Uri:            adapter.URI("myURI"),
-						},
-						Res2Map: map[string]*sample_report.Res2{
-							"foo": {
-								Value:          int64(1),
-								Dimensions:     map[string]interface{}{"s": int64(2)},
-								Int64Primitive: 54362,
-								DnsName:        adapter.DNSName("myDNS"),
-								Duration:       10 * time.Second,
-								EmailAddr:      adapter.EmailAddress("myEMAIL"),
-								IpAddr:         net.ParseIP("0.0.0.0"),
-								TimeStamp:      time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-								Uri:            adapter.URI("myURI"),
-							},
-						},
-					},
-				},
-				{
-					Name:            "bar",
-					Value:           int64(2),
-					Dimensions:      map[string]interface{}{"k": int64(3)},
-					BoolPrimitive:   true,
-					DoublePrimitive: 1.2,
-					Int64Primitive:  54362,
-					StringPrimitive: "mystring",
-					Int64Map:        map[string]int64{"b": int64(1)},
-					TimeStamp:       time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-					Duration:        10 * time.Second,
-				},
-			},
-		},
-		{
-			name: "EvalAllError",
-			insts: map[string]proto.Message{
-				"foo": &sample_report.InstanceParam{
-					Value:           "1",
-					Dimensions:      map[string]string{"s": "bad.attribute"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-				},
-			},
-			hdlr:      &fakeReportHandler{},
-			wantError: "unknown attribute bad.attribute",
-		},
-		{
-			name: "EvalAllErrorSubMessage",
-			insts: map[string]proto.Message{
-				"foo": &sample_report.InstanceParam{
-					Value:           "1",
-					Dimensions:      map[string]string{"s": "1"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-					Res1: &sample_report.Res1InstanceParam{
-						Value:           "1",
-						Dimensions:      map[string]string{"s": "bad.attribute"},
-						BoolPrimitive:   "true",
-						DoublePrimitive: "1.2",
-						Int64Primitive:  "54362",
-						StringPrimitive: `"mystring"`,
-						Int64Map:        map[string]string{"a": "1"},
-						TimeStamp:       "request.timestamp",
-						Duration:        "request.duration",
-					},
-				},
-			},
-			hdlr:      &fakeReportHandler{},
-			wantError: "failed to evaluate field 'Res1.Dimensions' for instance 'foo'",
-		},
-		{
-			name: "EvalError",
-			insts: map[string]proto.Message{
-				"foo": &sample_report.InstanceParam{
-					Value:           "bad.attribute",
-					Dimensions:      map[string]string{"s": "2"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-				},
-			},
-			hdlr:      &fakeReportHandler{},
-			wantError: "unknown attribute bad.attribute",
-		},
-		{
-			name: "EvalErrorSubMsg",
-			insts: map[string]proto.Message{
-				"foo": &sample_report.InstanceParam{
-					Value:           "1",
-					Dimensions:      map[string]string{"s": "2"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-					Res1: &sample_report.Res1InstanceParam{
-						Value:           "bad.attribute",
-						Dimensions:      map[string]string{"s": "2"},
-						BoolPrimitive:   "true",
-						DoublePrimitive: "1.2",
-						Int64Primitive:  "54362",
-						StringPrimitive: `"mystring"`,
-						Int64Map:        map[string]string{"a": "1"},
-						TimeStamp:       "request.timestamp",
-						Duration:        "request.duration",
-					},
-				},
-			},
-			hdlr:      &fakeReportHandler{},
-			wantError: "failed to evaluate field 'Res1.Value' for instance 'foo'",
-		},
-		{
-			name: "AttributeAbsentAtRuntime",
-			insts: map[string]proto.Message{
-				"foo": &sample_report.InstanceParam{
-					Value:           "int64.absent | 2",
-					Dimensions:      map[string]string{"s": "str.absent | \"\""},
-					BoolPrimitive:   "bool.absent | true",
-					DoublePrimitive: "double.absent | 1.2",
-					Int64Primitive:  "int64.absent | 123",
-					StringPrimitive: "str.absent | \"\"",
-					Int64Map:        map[string]string{"a": "int64.absent | 123"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-				},
-			},
-			hdlr: &fakeReportHandler{},
-			wantInstance: []*sample_report.Instance{
-				{
-					Name:            "foo",
-					Value:           int64(2),
-					Dimensions:      map[string]interface{}{"s": ""},
-					BoolPrimitive:   true,
-					DoublePrimitive: 1.2,
-					Int64Primitive:  123,
-					StringPrimitive: "",
-					Int64Map:        map[string]int64{"a": int64(123)},
-					TimeStamp:       time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-					Duration:        10 * time.Second,
-				},
-			},
-		},
-		{
-			name: "ProcessError",
-			insts: map[string]proto.Message{
-				"foo": &sample_report.InstanceParam{
-					Value:           "1",
-					Dimensions:      map[string]string{"s": "2"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-				},
-			},
-			hdlr:      &fakeReportHandler{retError: fmt.Errorf("error from process method")},
-			wantError: "error from process method",
-		},
-	} {
-		t.Run(tst.name, func(t *testing.T) {
-			h := &tst.hdlr
-			err := SupportedTmplInfo[sample_report.TemplateName].ProcessReport(context.TODO(), tst.insts, fakeBag{}, newFakeExpr(nil), *h)
-
-			if tst.wantError != "" {
-				if !strings.Contains(err.Error(), tst.wantError) {
-					t.Errorf("ProcessReport got error = %s, want %s", err.Error(), tst.wantError)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("ProcessReport got error %v , want success", err)
-				}
-				v := (*h).(*fakeReportHandler).procCallInput.([]*sample_report.Instance)
-				if !cmp(v, tst.wantInstance) {
-					t.Errorf("ProcessReport handler invoked value = %v, want %v", spew.Sdump(v), spew.Sdump(tst.wantInstance))
-				}
-			}
-		})
-	}
-}
-
-func TestProcessCheck(t *testing.T) {
-	for _, tst := range []struct {
-		name            string
-		instName        string
-		inst            proto.Message
-		hdlr            adapter.Handler
-		wantInstance    interface{}
-		wantCheckResult adapter.CheckResult
-		wantError       string
-	}{
-		{
-			name:     "Valid",
-			instName: "foo",
-			inst: &sample_check.InstanceParam{
-				CheckExpression: `"abcd asd"`,
-				StringMap:       map[string]string{"a": `"aaa"`},
-				Res1: &sample_check.Res1InstanceParam{
-					Value:           "1",
-					Dimensions:      map[string]string{"s": "2"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-					Res2: &sample_check.Res2InstanceParam{
-						Value:          "1",
-						Dimensions:     map[string]string{"s": "2"},
-						Int64Primitive: "54362",
-					},
-					Res2Map: map[string]*sample_check.Res2InstanceParam{
-						"foo": {
-							Value:          "1",
-							Dimensions:     map[string]string{"s": "2"},
-							Int64Primitive: "54362",
-						},
-					},
-				},
-			},
-			hdlr: &fakeCheckHandler{
-				retResult: adapter.CheckResult{Status: rpc.Status{Message: "msg"}},
-			},
-			wantInstance: &sample_check.Instance{
-				Name: "foo", CheckExpression: "abcd asd", StringMap: map[string]string{"a": "aaa"},
-				Res1: &sample_check.Res1{
-					Value:           int64(1),
-					Dimensions:      map[string]interface{}{"s": int64(2)},
-					BoolPrimitive:   true,
-					DoublePrimitive: 1.2,
-					Int64Primitive:  54362,
-					StringPrimitive: "mystring",
-					Int64Map:        map[string]int64{"a": int64(1)},
-					TimeStamp:       time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-					Duration:        10 * time.Second,
-					Res2: &sample_check.Res2{
-						Value:          int64(1),
-						Dimensions:     map[string]interface{}{"s": int64(2)},
-						Int64Primitive: 54362,
-					},
-					Res2Map: map[string]*sample_check.Res2{
-						"foo": {
-							Value:          int64(1),
-							Dimensions:     map[string]interface{}{"s": int64(2)},
-							Int64Primitive: 54362,
-						},
-					},
-				},
-			},
-			wantCheckResult: adapter.CheckResult{Status: rpc.Status{Message: "msg"}},
-		},
-		{
-			name:     "EvalError",
-			instName: "foo",
-			inst: &sample_check.InstanceParam{
-				CheckExpression: `"abcd asd"`,
-				StringMap:       map[string]string{"a": "bad.attribute"},
-			},
-			wantError: "unknown attribute bad.attribute",
-		},
-		{
-			name:     "ProcessError",
-			instName: "foo",
-			inst: &sample_check.InstanceParam{
-				CheckExpression: `"abcd asd"`,
-				StringMap:       map[string]string{"a": `"aaa"`},
-			},
-			hdlr: &fakeCheckHandler{
-				retError: fmt.Errorf("some error"),
-			},
-			wantError: "some error",
-		},
-	} {
-		t.Run(tst.name, func(t *testing.T) {
-			h := &tst.hdlr
-			res, err := SupportedTmplInfo[sample_check.TemplateName].ProcessCheck(context.TODO(), tst.instName, tst.inst, fakeBag{}, newFakeExpr(nil), *h)
-			if tst.wantError != "" {
-				if !strings.Contains(err.Error(), tst.wantError) {
-					t.Errorf("ProcessCheckSample got error = %s, want %s", err.Error(), tst.wantError)
-				}
-			} else {
-				v := (*h).(*fakeCheckHandler).procCallInput
-				if !reflect.DeepEqual(v, tst.wantInstance) {
-					t.Errorf("CheckSample handler "+
-						"invoked value = %v want %v", spew.Sdump(v), spew.Sdump(tst.wantInstance))
-				}
-				if !reflect.DeepEqual(tst.wantCheckResult, res) {
-					t.Errorf("CheckSample result = %v want %v", res, spew.Sdump(tst.wantCheckResult))
-				}
-			}
-		})
-	}
-}
-
-func TestProcessQuota(t *testing.T) {
-	for _, tst := range []struct {
-		name            string
-		instName        string
-		inst            proto.Message
-		hdlr            adapter.Handler
-		wantInstance    interface{}
-		wantQuotaResult adapter.QuotaResult
-		wantError       string
-	}{
-		{
-			name:     "Valid",
-			instName: "foo",
-			inst: &sample_quota.InstanceParam{
-				Dimensions: map[string]string{"a": `"str"`},
-				BoolMap:    map[string]string{"a": "true"},
-				Res1: &sample_quota.Res1InstanceParam{
-					Value:           "1",
-					Dimensions:      map[string]string{"s": "2"},
-					BoolPrimitive:   "true",
-					DoublePrimitive: "1.2",
-					Int64Primitive:  "54362",
-					StringPrimitive: `"mystring"`,
-					Int64Map:        map[string]string{"a": "1"},
-					TimeStamp:       "request.timestamp",
-					Duration:        "request.duration",
-					Res2: &sample_quota.Res2InstanceParam{
-						Value:          "1",
-						Dimensions:     map[string]string{"s": "2"},
-						Int64Primitive: "54362",
-					},
-					Res2Map: map[string]*sample_quota.Res2InstanceParam{
-						"foo": {
-							Value:          "1",
-							Dimensions:     map[string]string{"s": "2"},
-							Int64Primitive: "54362",
-						},
-					},
-				},
-			},
-			hdlr: &fakeQuotaHandler{
-				retResult: adapter.QuotaResult{Amount: 1},
-			},
-			wantInstance: &sample_quota.Instance{
-				Name: "foo", Dimensions: map[string]interface{}{"a": "str"}, BoolMap: map[string]bool{"a": true},
-				Res1: &sample_quota.Res1{
-					Value:           int64(1),
-					Dimensions:      map[string]interface{}{"s": int64(2)},
-					BoolPrimitive:   true,
-					DoublePrimitive: 1.2,
-					Int64Primitive:  54362,
-					StringPrimitive: "mystring",
-					Int64Map:        map[string]int64{"a": int64(1)},
-					TimeStamp:       time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-					Duration:        10 * time.Second,
-					Res2: &sample_quota.Res2{
-						Value:          int64(1),
-						Dimensions:     map[string]interface{}{"s": int64(2)},
-						Int64Primitive: 54362,
-					},
-					Res2Map: map[string]*sample_quota.Res2{
-						"foo": {
-							Value:          int64(1),
-							Dimensions:     map[string]interface{}{"s": int64(2)},
-							Int64Primitive: 54362,
-						},
-					},
-				},
-			},
-			wantQuotaResult: adapter.QuotaResult{Amount: 1},
-		},
-		{
-			name:     "EvalError",
-			instName: "foo",
-			inst: &sample_quota.InstanceParam{
-				Dimensions: map[string]string{"a": "bad.attribute"},
-				BoolMap:    map[string]string{"a": "true"},
-			},
-			wantError: "unknown attribute bad.attribute",
-		},
-		{
-			name:     "EvalErrorSubMsg",
-			instName: "foo",
-			inst: &sample_quota.InstanceParam{
-				Dimensions: map[string]string{"a": "source.string"},
-				BoolMap:    map[string]string{"a": "true"},
-				Res1: &sample_quota.Res1InstanceParam{
-					Value: "bad.attribute",
-				},
-			},
-			wantError: "unknown attribute bad.attribute",
-		},
-		{
-			name:     "ProcessError",
-			instName: "foo",
-			inst: &sample_quota.InstanceParam{
-				Dimensions: map[string]string{"a": `"str"`},
-				BoolMap:    map[string]string{"a": "true"},
-			},
-			hdlr: &fakeQuotaHandler{
-				retError: fmt.Errorf("some error"),
-			},
-			wantError: "some error",
-		},
-	} {
-		t.Run(tst.name, func(t *testing.T) {
-			h := &tst.hdlr
-			res, err := SupportedTmplInfo[sample_quota.TemplateName].ProcessQuota(context.TODO(), tst.instName,
-				tst.inst, fakeBag{}, newFakeExpr(nil), *h, adapter.QuotaArgs{})
-
-			if tst.wantError != "" {
-				if !strings.Contains(err.Error(), tst.wantError) {
-					t.Errorf("ProcessQuotaSample got error = %s, want %s", err.Error(), tst.wantError)
-				}
-			} else {
-				v := (*h).(*fakeQuotaHandler).procCallInput
-				if !reflect.DeepEqual(v, tst.wantInstance) {
-					t.Errorf("ProcessQuotaSample handler "+
-						"invoked value = %v want %v", spew.Sdump(v), spew.Sdump(tst.wantInstance))
-				}
-				if !reflect.DeepEqual(tst.wantQuotaResult, res) {
-					t.Errorf("ProcessQuotaSample result = %v want %v", res, spew.Sdump(tst.wantQuotaResult))
-				}
-			}
-		})
-	}
 }
 
 func TestInferTypeForApa(t *testing.T) {
@@ -1617,183 +1058,6 @@ attribute_bindings:
 			} else {
 				if cerr == nil || !strings.Contains(cerr.Error(), tst.wantErr) {
 					t.Errorf("got error %v\nwant %v", cerr, tst.wantErr)
-				}
-			}
-		})
-	}
-}
-
-func TestProcessApa(t *testing.T) {
-	for _, tst := range []struct {
-		name         string
-		instName     string
-		instParam    proto.Message
-		wantInstance interface{}
-		hdlr         adapter.Handler
-		wantOutAttrs map[string]interface{}
-		wantError    string
-	}{
-		{
-			name:     "Valid",
-			instName: "foo",
-			instParam: &istio_mixer_adapter_sample_myapa.InstanceParam{
-				BoolPrimitive:   "true",
-				DoublePrimitive: "1.2",
-				Int64Primitive:  "54362",
-				StringPrimitive: `"mystring"`,
-				TimeStamp:       "request.timestamp",
-				Duration:        "request.duration",
-				OptionalIP:      `ip("0.0.0.0")`,
-				Email:           "source.email",
-				DimensionsFixedInt64ValueDType: map[string]string{"a": "1"},
-				Res3Map: map[string]*istio_mixer_adapter_sample_myapa.Resource3InstanceParam{
-					"source2": {
-						BoolPrimitive:   "true",
-						DoublePrimitive: "1.2",
-						Int64Primitive:  "54362",
-						StringPrimitive: `"mystring"`,
-						TimeStamp:       "request.timestamp",
-						Duration:        "request.duration",
-					},
-				},
-				AttributeBindings: map[string]string{
-					"source.myint64Primitive":  "$out.int64Primitive",
-					"source.myboolPrimitive":   "$out.boolPrimitive",
-					"source.mydoublePrimitive": "$out.doublePrimitive",
-					"source.mystring":          "$out.stringPrimitive",
-					"source.mytimeStamp":       "$out.timeStamp",
-					"source.myduration":        "$out.duration",
-					"source.email":             "$out.email",
-					"source.ip":                "$out.out_ip",
-					"source.labels":            "$out.out_str_map",
-				},
-			},
-			hdlr: &fakeMyApaHandler{
-				retOutput: &istio_mixer_adapter_sample_myapa.Output{
-					BoolPrimitive:   true,
-					DoublePrimitive: 1237,
-					StringPrimitive: "1237",
-					TimeStamp:       time.Date(2019, time.January, 01, 0, 0, 0, 0, time.UTC),
-					Duration:        10 * time.Second,
-					Int64Primitive:  1237,
-					Email:           adapter.EmailAddress("updatedfoo@bar.com"),
-					OutIp:           net.ParseIP("1.2.3.4"),
-					OutStrMap:       map[string]string{"a": "b"},
-				},
-			},
-			wantOutAttrs: map[string]interface{}{
-				"source.mystring":          "1237",
-				"source.mytimeStamp":       time.Date(2019, time.January, 01, 0, 0, 0, 0, time.UTC),
-				"source.myduration":        10 * time.Second,
-				"source.myint64Primitive":  int64(1237),
-				"source.myboolPrimitive":   true,
-				"source.mydoublePrimitive": float64(1237),
-				"source.email":             "updatedfoo@bar.com",
-				"source.ip":                []uint8(net.ParseIP("1.2.3.4")),
-				"source.labels":            map[string]string{"a": "b"},
-			},
-			wantInstance: &istio_mixer_adapter_sample_myapa.Instance{
-				Name:                           "foo",
-				BoolPrimitive:                  true,
-				DoublePrimitive:                1.2,
-				Int64Primitive:                 54362,
-				StringPrimitive:                "mystring",
-				TimeStamp:                      time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-				Duration:                       10 * time.Second,
-				DimensionsFixedInt64ValueDType: map[string]int64{"a": int64(1)},
-				OptionalIP:                     net.ParseIP("0.0.0.0"),
-				Email:                          "foo@bar.com",
-				Res3Map: map[string]*istio_mixer_adapter_sample_myapa.Resource3{
-					"source2": {
-						BoolPrimitive:                  true,
-						DoublePrimitive:                1.2,
-						Int64Primitive:                 54362,
-						StringPrimitive:                "mystring",
-						TimeStamp:                      time.Date(2017, time.January, 01, 0, 0, 0, 0, time.UTC),
-						Duration:                       10 * time.Second,
-						DimensionsFixedInt64ValueDType: map[string]int64{},
-					},
-				},
-			},
-		},
-		{
-			name:     "EvalError",
-			instName: "foo",
-			instParam: &istio_mixer_adapter_sample_myapa.InstanceParam{
-				Int64Primitive: "bad.attribute",
-			},
-			wantError: "unknown attribute bad.attribute",
-		},
-		{
-			name:     "ProcessError",
-			instName: "foo",
-			instParam: &istio_mixer_adapter_sample_myapa.InstanceParam{
-				BoolPrimitive:                  "true",
-				DoublePrimitive:                "1.2",
-				Int64Primitive:                 "54362",
-				StringPrimitive:                `"mystring"`,
-				TimeStamp:                      "request.timestamp",
-				Duration:                       "request.duration",
-				DimensionsFixedInt64ValueDType: map[string]string{"a": "1"},
-				OptionalIP:                     `ip("0.0.0.0")`,
-				Email:                          "source.email",
-				Res3Map: map[string]*istio_mixer_adapter_sample_myapa.Resource3InstanceParam{
-					"source2": {
-						BoolPrimitive:   "true",
-						DoublePrimitive: "1.2",
-						Int64Primitive:  "54362",
-						StringPrimitive: `"mystring"`,
-						TimeStamp:       "request.timestamp",
-						Duration:        "request.duration",
-					},
-				},
-				AttributeBindings: map[string]string{
-					"source.myint64Primitive":  "$out.int64Primitive",
-					"source.myboolPrimitive":   "$out.boolPrimitive",
-					"source.mydoublePrimitive": "$out.doublePrimitive",
-					"source.mystring":          "$out.stringPrimitive",
-					"source.mytimeStamp":       "$out.timeStamp",
-					"source.myduration":        "$out.duration",
-				},
-			},
-			hdlr: &fakeMyApaHandler{
-				retError: fmt.Errorf("some error"),
-			},
-			wantError: "some error",
-		},
-	} {
-		t.Run(tst.name, func(t *testing.T) {
-			h := &tst.hdlr
-			returnAttr, err := SupportedTmplInfo[istio_mixer_adapter_sample_myapa.TemplateName].ProcessGenAttrs(
-				context.TODO(),
-				tst.instName,
-				tst.instParam,
-				fakeBag{},
-				newFakeExpr(SupportedTmplInfo[istio_mixer_adapter_sample_myapa.TemplateName].AttributeManifests),
-				*h)
-			if tst.wantError != "" {
-				if !strings.Contains(err.Error(), tst.wantError) {
-					t.Errorf("TestProcessApa got error = %s, want %s", err.Error(), tst.wantError)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("got error; want success: error %v", err)
-				}
-				v := (*h).(*fakeMyApaHandler).procCallInput
-				if !reflect.DeepEqual(v, tst.wantInstance) {
-					t.Errorf("Apa handler "+
-						"invoked value = %v want %v", spew.Sdump(v), spew.Sdump(tst.wantInstance))
-				}
-
-				if len(returnAttr.Names()) != len(tst.wantOutAttrs) {
-					t.Fatalf("Apa handler "+
-						"return attrs = %v want %v", spew.Sdump(returnAttr), spew.Sdump(tst.wantOutAttrs))
-				}
-				for k, v := range tst.wantOutAttrs {
-					if x, _ := returnAttr.Get(k); !reflect.DeepEqual(x, v) {
-						t.Errorf("Apa handler "+
-							"return attattrs = %v want %v", spew.Sdump(returnAttr), spew.Sdump(tst.wantOutAttrs))
-					}
 				}
 			}
 		})

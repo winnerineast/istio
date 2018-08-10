@@ -20,7 +20,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/golang/glog"
+	"istio.io/istio/pkg/log"
 )
 
 var (
@@ -58,33 +58,44 @@ type runnable interface {
 	Run() int
 }
 
-// InitGlog sets the logging directory.
+// InitLogging sets the logging directory.
 // Should be called right after flag.Parse().
-func InitGlog() error {
+func InitLogging() error {
+	// Create a temporary directory for any logging files.
 	tmpDir, err := ioutil.TempDir(os.TempDir(), tmpPrefix)
 	if err != nil {
 		return err
 	}
-	f := flag.Lookup("log_dir")
-	if err = f.Value.Set(tmpDir); err != nil {
+
+	// Configure Istio logging to use a file under the temp dir.
+	o := log.DefaultOptions()
+	tmpLogFile, err := ioutil.TempFile(tmpDir, tmpPrefix)
+	if err != nil {
 		return err
 	}
-	glog.Info("Logging initialized")
+	o.OutputPaths = []string{tmpLogFile.Name(), "stdout"}
+	if err := log.Configure(o); err != nil {
+		return err
+	}
+
+	log.Info("Logging initialized")
 	return nil
 }
 
-// NewCommonConfig creates a full config will all supported configs.
-func NewCommonConfig(testID string) (*CommonConfig, error) {
+// NewCommonConfigWithVersion creates a new CommonConfig with the specified
+// version of Istio. If baseVersion is empty, it will use the local head
+// version.
+func NewCommonConfigWithVersion(testID, version string) (*CommonConfig, error) {
 	t, err := newTestInfo(testID)
 	if err != nil {
 		return nil, err
 	}
-	k, err := newKubeInfo(t.LogsPath, t.RunID)
+	k, err := newKubeInfo(t.TempDir, t.RunID, version)
 	if err != nil {
 		return nil, err
 	}
 	cl := new(testCleanup)
-	cl.skipCleanup = *skipCleanup
+	cl.skipCleanup = os.Getenv("SKIP_CLEANUP") != "" || *skipCleanup
 
 	c := &CommonConfig{
 		Info:    t,
@@ -95,7 +106,17 @@ func NewCommonConfig(testID string) (*CommonConfig, error) {
 	c.Cleanup.RegisterCleanable(c.Kube)
 	c.Cleanup.RegisterCleanable(c.Kube.Istioctl)
 	c.Cleanup.RegisterCleanable(c.Kube.AppManager)
+	if c.Kube.RemoteKubeConfig != "" {
+		c.Cleanup.RegisterCleanable(c.Kube.RemoteAppManager.istioctl)
+		c.Cleanup.RegisterCleanable(c.Kube.RemoteAppManager)
+	}
+
 	return c, nil
+}
+
+// NewCommonConfig creates a full config with the local head version.
+func NewCommonConfig(testID string) (*CommonConfig, error) {
+	return NewCommonConfigWithVersion(testID, "")
 }
 
 func (t *testCleanup) RegisterCleanable(c Cleanable) {
@@ -134,7 +155,7 @@ func (t *testCleanup) popCleanupAction() func() error {
 
 func (t *testCleanup) init() error {
 	// Run setup on all cleanable
-	glog.Info("Starting Initialization")
+	log.Info("Starting Initialization")
 	c := t.popCleanable()
 	for c != nil {
 		err := c.Setup()
@@ -144,48 +165,42 @@ func (t *testCleanup) init() error {
 		}
 		c = t.popCleanable()
 	}
-	glog.Info("Initialization complete")
+	log.Info("Initialization complete")
 	return nil
 }
 
 func (t *testCleanup) cleanup() {
 	if t.skipCleanup {
-		glog.Info("Dev mode (--skip_cleanup), skipping cleanup (removal of namespace/install)")
+		log.Info("Dev mode (--skip_cleanup), skipping cleanup (removal of namespace/install)")
 		return
 	}
 	// Run tear down on all cleanable
-	glog.Info("Starting Cleanup")
+	log.Info("Starting Cleanup")
 	fn := t.popCleanupAction()
 	for fn != nil {
 		if err := fn(); err != nil {
-			glog.Errorf("Failed to cleanup. Error %s", err)
+			log.Errorf("Failed to cleanup. Error %s", err)
 		}
 		fn = t.popCleanupAction()
 	}
-	glog.Info("Cleanup complete")
+	log.Info("Cleanup complete")
 }
 
 // Save test logs to tmp dir
 // Fetch and save cluster pod logs using kuebctl
 // Logs are uploaded during test tear down
 func (c *CommonConfig) saveLogs(r int) error {
-	if c.Cleanup.skipCleanup {
-		glog.Info("Dev mode (--skip_cleanup), skipping log fetching")
-		return nil
-	}
+	// Logs are fetched even if skip_cleanup is called - the namespace is left around.
 	if c.Info == nil {
-		glog.Warning("Skipping log saving as Info is not initialized")
+		log.Warn("Skipping log saving as Info is not initialized")
 		return nil
 	}
-	if c.Info.LogBucketPath == "" {
-		return nil
-	}
-	glog.Info("Saving logs")
+	log.Info("Saving logs")
 	if err := c.Info.Update(r); err != nil {
-		glog.Errorf("Could not create status file. Error %s", err)
+		log.Errorf("Could not create status file. Error %s", err)
 		return err
 	}
-	return c.Info.FetchAndSaveClusterLogs(c.Kube.Namespace)
+	return c.Info.FetchAndSaveClusterLogs(c.Kube.Namespace, c.Kube.KubeConfig)
 }
 
 // RunTest sets up all registered cleanables in FIFO order
@@ -194,14 +209,14 @@ func (c *CommonConfig) saveLogs(r int) error {
 func (c *CommonConfig) RunTest(m runnable) int {
 	var ret int
 	if err := c.Cleanup.init(); err != nil {
-		glog.Errorf("Failed to complete Init. Error %s", err)
+		log.Errorf("Failed to complete Init. Error %s", err)
 		ret = 1
 	} else {
-		glog.Info("Running test")
+		log.Info("Running test")
 		ret = m.Run()
 	}
 	if err := c.saveLogs(ret); err != nil {
-		glog.Warningf("Log saving incomplete: %v", err)
+		log.Warnf("Log saving incomplete: %v", err)
 	}
 	c.Cleanup.cleanup()
 	return ret

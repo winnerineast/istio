@@ -4,6 +4,11 @@
 /*
 	Package config is a generated protocol buffer package.
 
+	The `circonus` adapter enables Istio to deliver metric data to the
+	[Circonus](https://www.circonus.com) monitoring backend.
+
+	This adapter supports the [metric template](https://istio.io/docs/reference/config/policy-and-telemetry/templates/metric/).
+
 	It is generated from these files:
 		mixer/adapter/circonus/config/config.proto
 
@@ -22,7 +27,7 @@ import time "time"
 
 import strconv "strconv"
 
-import github_com_gogo_protobuf_types "github.com/gogo/protobuf/types"
+import types "github.com/gogo/protobuf/types"
 
 import strings "strings"
 import reflect "reflect"
@@ -68,6 +73,7 @@ func (Params_MetricInfo_Type) EnumDescriptor() ([]byte, []int) {
 	return fileDescriptorConfig, []int{0, 0, 0}
 }
 
+// Configuration format for the Circonus adapter.
 type Params struct {
 	// Circonus SubmissionURL to HTTPTrap check
 	SubmissionUrl      string               `protobuf:"bytes,1,opt,name=submission_url,json=submissionUrl,proto3" json:"submission_url,omitempty"`
@@ -125,8 +131,8 @@ func (m *Params) MarshalTo(dAtA []byte) (int, error) {
 	}
 	dAtA[i] = 0x12
 	i++
-	i = encodeVarintConfig(dAtA, i, uint64(github_com_gogo_protobuf_types.SizeOfStdDuration(m.SubmissionInterval)))
-	n1, err := github_com_gogo_protobuf_types.StdDurationMarshalTo(m.SubmissionInterval, dAtA[i:])
+	i = encodeVarintConfig(dAtA, i, uint64(types.SizeOfStdDuration(m.SubmissionInterval)))
+	n1, err := types.StdDurationMarshalTo(m.SubmissionInterval, dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
@@ -191,7 +197,7 @@ func (m *Params) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovConfig(uint64(l))
 	}
-	l = github_com_gogo_protobuf_types.SizeOfStdDuration(m.SubmissionInterval)
+	l = types.SizeOfStdDuration(m.SubmissionInterval)
 	n += 1 + l + sovConfig(uint64(l))
 	if len(m.Metrics) > 0 {
 		for _, e := range m.Metrics {
@@ -343,7 +349,7 @@ func (m *Params) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			if err := github_com_gogo_protobuf_types.StdDurationUnmarshal(&m.SubmissionInterval, dAtA[iNdEx:postIndex]); err != nil {
+			if err := types.StdDurationUnmarshal(&m.SubmissionInterval, dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex

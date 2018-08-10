@@ -17,7 +17,7 @@
 package crd
 
 import (
-	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -29,13 +29,7 @@ import (
 
 	"istio.io/istio/mixer/pkg/config/store"
 	"istio.io/istio/pkg/log"
-)
-
-const (
-	// API group / version for istio config.
-	apiGroup        = "config.istio.io"
-	apiVersion      = "v1alpha2"
-	apiGroupVersion = apiGroup + "/" + apiVersion
+	"istio.io/istio/pkg/probe"
 )
 
 const (
@@ -48,24 +42,30 @@ const (
 	// through "retry-timeout" query parameter in the config URL,
 	// like k8s://?retry-timeout=1m
 	crdRetryTimeout = time.Second * 30
+
+	// ConfigAPIGroup is the API group for the config CRDs.
+	ConfigAPIGroup = "config.istio.io"
+	// ConfigAPIVersion is the API version for the config CRDs.
+	ConfigAPIVersion = "v1alpha2"
 )
 
-// The interval to wait between the attempt to initialize caches. This is not const
-// to allow changing the value for unittests.
-var retryInterval = time.Second / 2
+// When retrying happens on initializing caches, it shouldn't log the message for
+// every retry, it may flood the log messages if the initialization is never satisfied.
+// see also https://github.com/istio/istio/issues/3138
+const logPerRetries = 100
 
 type listerWatcherBuilderInterface interface {
 	build(res metav1.APIResource) cache.ListerWatcher
 }
 
-func waitForSynced(ctx context.Context, informers map[string]cache.SharedInformer) <-chan struct{} {
+func waitForSynced(donec chan struct{}, informers map[string]cache.SharedInformer) <-chan struct{} {
 	out := make(chan struct{})
 	go func() {
 		tick := time.NewTicker(initWaiterInterval)
 	loop:
 		for len(informers) > 0 {
 			select {
-			case <-ctx.Done():
+			case <-donec:
 				break loop
 			case <-tick.C:
 				for k, i := range informers {
@@ -81,63 +81,84 @@ func waitForSynced(ctx context.Context, informers map[string]cache.SharedInforme
 	return out
 }
 
-// Store offers store.Store2Backend interface through kubernetes custom resource definitions.
+// Store offers store.StoreBackend interface through kubernetes custom resource definitions.
 type Store struct {
-	conf         *rest.Config
-	ns           map[string]bool
-	retryTimeout time.Duration
+	conf            *rest.Config
+	ns              map[string]bool
+	retryTimeout    time.Duration
+	donec           chan struct{}
+	apiGroupVersion string
 
 	cacheMutex sync.Mutex
 	caches     map[string]cache.Store
 
 	watchMutex sync.RWMutex
-	watchCtx   context.Context
 	watchCh    chan store.BackendEvent
 
 	// They are used to inject testing interfaces.
 	discoveryBuilder     func(conf *rest.Config) (discovery.DiscoveryInterface, error)
 	listerWatcherBuilder func(conf *rest.Config) (listerWatcherBuilderInterface, error)
+
+	*probe.Probe
+
+	// The interval to wait between the attempt to initialize caches. This is not const
+	// to allow changing the value for unittests.
+	retryInterval time.Duration
 }
 
-var _ store.Store2Backend = &Store{}
+var _ store.Backend = new(Store)
+var _ probe.SupportsProbe = new(Store)
+
+// Stop implements store.Backend interface.
+func (s *Store) Stop() {
+	close(s.donec)
+}
 
 // checkAndCreateCaches checks the presence of custom resource definitions through the discovery API,
-// and then create caches through lwBUilder which is in kinds. It retries within the timeout duration.
-// If the timeout duration is 0, it waits forever (which should be done within a goroutine).
+// and then create caches through lwBUilder which is in kinds. It retries as long as retryDone channel
+// is open.
 // Returns the created shared informers, and the list of kinds which are not created yet.
 func (s *Store) checkAndCreateCaches(
-	ctx context.Context,
-	timeout time.Duration,
+	retryDone chan struct{},
 	d discovery.DiscoveryInterface,
 	lwBuilder listerWatcherBuilderInterface,
-	kinds []string) (informers map[string]cache.SharedInformer, remaining []string) {
+	kinds []string) []string {
 	kindsSet := map[string]bool{}
 	for _, k := range kinds {
 		kindsSet[k] = true
 	}
-	informers = map[string]cache.SharedInformer{}
-	retry := false
-	retryCtx := ctx
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		retryCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
+	informers := map[string]cache.SharedInformer{}
+	retryCount := 0
+loop:
 	for added := 0; added < len(kinds); {
-		if retryCtx.Err() != nil {
-			break
+		select {
+		case <-retryDone:
+			break loop
+		default:
 		}
-		if retry {
-			log.Debug("Retrying to fetch config...")
-			time.Sleep(retryInterval)
+		if retryCount > 0 {
+			if retryCount%logPerRetries == 1 {
+				remainingKeys := make([]string, 0, len(kinds))
+				for k := range kindsSet {
+					remainingKeys = append(remainingKeys, k)
+				}
+				log.Debugf("Retrying to fetch config: %+v", remainingKeys)
+			}
+			time.Sleep(s.retryInterval)
 		}
-		resources, err := d.ServerResourcesForGroupVersion(apiGroupVersion)
+		retryCount++
+		groupVersion := ConfigAPIGroup + "/" + ConfigAPIVersion
+		if s.apiGroupVersion != "" {
+			groupVersion = s.apiGroupVersion
+		}
+		resources, err := d.ServerResourcesForGroupVersion(groupVersion)
 		if err != nil {
 			log.Debugf("Failed to obtain resources for CRD: %v", err)
 			continue
 		}
 		s.cacheMutex.Lock()
 		for _, res := range resources.APIResources {
+
 			if _, ok := s.caches[res.Kind]; ok {
 				continue
 			}
@@ -148,22 +169,27 @@ func (s *Store) checkAndCreateCaches(
 				informers[res.Kind] = informer
 				delete(kindsSet, res.Kind)
 				informer.AddEventHandler(s)
-				go informer.Run(ctx.Done())
+				go informer.Run(s.donec)
 				added++
 			}
 		}
 		s.cacheMutex.Unlock()
-		retry = true
 	}
-	remaining = make([]string, 0, len(kindsSet))
+	<-waitForSynced(retryDone, informers)
+	remaining := make([]string, 0, len(kindsSet))
 	for k := range kindsSet {
 		remaining = append(remaining, k)
 	}
-	return informers, remaining
+	var err error
+	if len(remaining) > 0 {
+		err = fmt.Errorf("not yet ready: %+v", remaining)
+	}
+	s.SetAvailable(err)
+	return remaining
 }
 
-// Init implements store.Store2Backend interface.
-func (s *Store) Init(ctx context.Context, kinds []string) error {
+// Init implements store.StoreBackend interface.
+func (s *Store) Init(kinds []string) error {
 	d, err := s.discoveryBuilder(s.conf)
 	if err != nil {
 		return err
@@ -173,26 +199,31 @@ func (s *Store) Init(ctx context.Context, kinds []string) error {
 		return err
 	}
 	s.caches = make(map[string]cache.Store, len(kinds))
-	informers, remainingKinds := s.checkAndCreateCaches(ctx, s.retryTimeout, d, lwBuilder, kinds)
+	timeout := time.After(s.retryTimeout)
+	timeoutdone := make(chan struct{})
+	s.retryInterval = time.Second / 2
+	go func() {
+		<-timeout
+		close(timeoutdone)
+	}()
+	remainingKinds := s.checkAndCreateCaches(timeoutdone, d, lwBuilder, kinds)
 	if len(remainingKinds) > 0 {
 		// Wait asynchronously for other kinds.
-		go s.checkAndCreateCaches(ctx, 0, d, lwBuilder, remainingKinds)
+		go s.checkAndCreateCaches(s.donec, d, lwBuilder, remainingKinds)
 	}
-	<-waitForSynced(ctx, informers)
 	return nil
 }
 
-// Watch implements store.Store2Backend interface.
-func (s *Store) Watch(ctx context.Context) (<-chan store.BackendEvent, error) {
+// Watch implements store.Backend interface.
+func (s *Store) Watch() (<-chan store.BackendEvent, error) {
 	ch := make(chan store.BackendEvent)
 	s.watchMutex.Lock()
-	s.watchCtx = ctx
 	s.watchCh = ch
 	s.watchMutex.Unlock()
 	return ch, nil
 }
 
-// Get implements store.Store2Backend interface.
+// Get implements store.Backend interface.
 func (s *Store) Get(key store.Key) (*store.BackEndResource, error) {
 	if s.ns != nil && !s.ns[key.Namespace] {
 		return nil, store.ErrNotFound
@@ -214,10 +245,11 @@ func (s *Store) Get(key store.Key) (*store.BackEndResource, error) {
 		return nil, store.ErrNotFound
 	}
 	uns, _ := obj.(*unstructured.Unstructured)
-	return backEndResource(uns), nil
+	return ToBackEndResource(uns), nil
 }
 
-func backEndResource(uns *unstructured.Unstructured) *store.BackEndResource {
+// ToBackEndResource converts an unstructured k8s resource into a mixer backend resource.
+func ToBackEndResource(uns *unstructured.Unstructured) *store.BackEndResource {
 	spec, _ := uns.UnstructuredContent()["spec"].(map[string]interface{})
 	return &store.BackEndResource{
 		Metadata: store.ResourceMeta{
@@ -231,7 +263,7 @@ func backEndResource(uns *unstructured.Unstructured) *store.BackEndResource {
 	}
 }
 
-// List implements store.Store2Backend interface.
+// List implements store.Backend interface.
 func (s *Store) List() map[store.Key]*store.BackEndResource {
 	result := make(map[store.Key]*store.BackEndResource)
 	s.cacheMutex.Lock()
@@ -242,7 +274,7 @@ func (s *Store) List() map[store.Key]*store.BackEndResource {
 			if s.ns != nil && !s.ns[key.Namespace] {
 				continue
 			}
-			result[key] = backEndResource(uns)
+			result[key] = ToBackEndResource(uns)
 		}
 	}
 	s.cacheMutex.Unlock()
@@ -255,18 +287,18 @@ func toEvent(t store.ChangeType, obj interface{}) store.BackendEvent {
 	return store.BackendEvent{
 		Type:  t,
 		Key:   key,
-		Value: backEndResource(uns),
+		Value: ToBackEndResource(uns),
 	}
 }
 
 func (s *Store) dispatch(ev store.BackendEvent) {
 	s.watchMutex.RLock()
 	defer s.watchMutex.RUnlock()
-	if s.watchCtx == nil {
+	if s.watchCh == nil {
 		return
 	}
 	select {
-	case <-s.watchCtx.Done():
+	case <-s.donec:
 	case s.watchCh <- ev:
 	}
 }

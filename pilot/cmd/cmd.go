@@ -15,20 +15,12 @@
 package cmd
 
 import (
-	"flag"
-	"fmt"
 	"io/ioutil"
-	"os"
-	"os/signal"
-	"syscall"
 
-	"github.com/golang/glog"
 	multierror "github.com/hashicorp/go-multierror"
-	"github.com/spf13/cobra"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/pilot/proxy"
-	"istio.io/istio/pilot/tools/version"
+	"istio.io/istio/pilot/pkg/model"
 )
 
 // ReadMeshConfig gets mesh configuration from a config file
@@ -37,39 +29,5 @@ func ReadMeshConfig(filename string) (*meshconfig.MeshConfig, error) {
 	if err != nil {
 		return nil, multierror.Prefix(err, "cannot read mesh config file")
 	}
-	return proxy.ApplyMeshConfigDefaults(string(yaml))
-}
-
-// VersionCmd is a sub-command to print version information
-var VersionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Display version information and exit",
-	Run: func(*cobra.Command, []string) {
-		fmt.Print(version.Version())
-	},
-}
-
-// AddFlags carries over glog flags with new defaults
-func AddFlags(rootCmd *cobra.Command) {
-	flag.CommandLine.VisitAll(func(gf *flag.Flag) {
-		switch gf.Name {
-		case "logtostderr":
-			if err := gf.Value.Set("true"); err != nil {
-				fmt.Printf("missing logtostderr flag: %v", err)
-			}
-		case "alsologtostderr", "log_dir", "stderrthreshold":
-			// always use stderr for logging
-		default:
-			rootCmd.PersistentFlags().AddGoFlag(gf)
-		}
-	})
-}
-
-// WaitSignal awaits for SIGINT or SIGTERM and closes the channel
-func WaitSignal(stop chan struct{}) {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	<-sigs
-	close(stop)
-	glog.Flush()
+	return model.ApplyMeshConfigDefaults(string(yaml))
 }

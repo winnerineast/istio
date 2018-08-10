@@ -723,6 +723,31 @@ func (in *Interpreter) run(fn *il.Function, bag attribute.Bag, step bool) (Resul
 			opstack[sp+1] = uint32(ti64 & 0xFFFFFFFF)
 			sp = sp + 2
 
+		case il.AddS:
+			if sp < 2 {
+				goto STACK_UNDERFLOW
+			}
+			t1 = opstack[sp-1]
+			t2 = opstack[sp-2]
+			sp = sp - 2
+			if t1 >= hp {
+				goto INVALID_HEAP_ACCESS
+			}
+			tStr = heap[t1].(string)
+			if t2 >= hp {
+				goto INVALID_HEAP_ACCESS
+			}
+			tStr2 = heap[t2].(string)
+			tStr2 += tStr
+			if hp == heapSize-1 {
+				goto HEAP_OVERFLOW
+			}
+			t3 = hp
+			heap[hp] = tStr2
+			hp++
+			opstack[sp] = t3
+			sp++
+
 		case il.SubI:
 			if sp < 4 {
 				goto STACK_UNDERFLOW

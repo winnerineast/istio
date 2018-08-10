@@ -21,7 +21,6 @@ import javax.json.JsonObject;
 import javax.json.JsonObjectBuilder;
 import javax.json.JsonReader;
 import javax.ws.rs.ApplicationPath;
-import javax.ws.rs.CookieParam;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.GET;
 import javax.ws.rs.HeaderParam;
@@ -33,7 +32,6 @@ import javax.ws.rs.client.Invocation.Builder;
 import javax.ws.rs.client.ResponseProcessingException;
 import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.Application;
-import javax.ws.rs.core.Cookie;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
@@ -42,29 +40,40 @@ public class LibertyRestEndpoint extends Application {
 
     private final static Boolean ratings_enabled = Boolean.valueOf(System.getenv("ENABLE_RATINGS"));
     private final static String star_color = System.getenv("STAR_COLOR") == null ? "black" : System.getenv("STAR_COLOR");
-    private final static String ratings_service = "http://ratings:9080/ratings";
-    
+    private final static String services_domain = System.getenv("SERVICES_DOMAIN") == null ? "" : ("." + System.getenv("SERVICES_DOMAIN"));
+    private final static String ratings_service = "http://ratings" + services_domain + ":9080/ratings";
+
     private String getJsonResponse (String productId, int starsReviewer1, int starsReviewer2) {
     	String result = "{";
     	result += "\"id\": \"" + productId + "\",";
     	result += "\"reviews\": [";
-    	
+
     	// reviewer 1:
     	result += "{";
     	result += "  \"reviewer\": \"Reviewer1\",";
     	result += "  \"text\": \"An extremely entertaining play by Shakespeare. The slapstick humour is refreshing!\"";
-    	if (starsReviewer1 != -1) {
-    		result += ", \"rating\": {\"stars\": " + starsReviewer1 + ", \"color\": \"" + star_color + "\"}";
-    	}
+      if (ratings_enabled) {
+        if (starsReviewer1 != -1) {
+          result += ", \"rating\": {\"stars\": " + starsReviewer1 + ", \"color\": \"" + star_color + "\"}";
+        }
+        else {
+          result += ", \"rating\": {\"error\": \"Ratings service is currently unavailable\"}";
+        }
+      }
     	result += "},";
     	
     	// reviewer 2:
     	result += "{";
     	result += "  \"reviewer\": \"Reviewer2\",";
     	result += "  \"text\": \"Absolutely fun and entertaining. The play lacks thematic depth when compared to other plays by Shakespeare.\"";
-    	if (starsReviewer1 != -1) {
-    		result += ", \"rating\": {\"stars\": " + starsReviewer2 + ", \"color\": \"" + star_color + "\"}";
-    	}
+      if (ratings_enabled) {
+        if (starsReviewer2 != -1) {
+          result += ", \"rating\": {\"stars\": " + starsReviewer2 + ", \"color\": \"" + star_color + "\"}";
+        }
+        else {
+          result += ", \"rating\": {\"error\": \"Ratings service is currently unavailable\"}";
+        }
+      }
     	result += "}";
     	
     	result += "]";
@@ -73,7 +82,7 @@ public class LibertyRestEndpoint extends Application {
     	return result;
     }
     
-    private JsonObject getRatings(String productId, Cookie user, String xreq, String xtraceid, String xspanid,
+    private JsonObject getRatings(String productId, String user, String xreq, String xtraceid, String xspanid,
                                   String xparentspanid, String xsampled, String xflags, String xotspan){
       ClientBuilder cb = ClientBuilder.newBuilder();
       String timeout = star_color.equals("black") ? "10000" : "2500";
@@ -104,7 +113,7 @@ public class LibertyRestEndpoint extends Application {
         builder.header("x-ot-span-context",xotspan);
       }
       if(user!=null) {
-        builder.cookie(user);
+        builder.header("end-user", user);
       }
       Response r = builder.get();
       int statusCode = r.getStatusInfo().getStatusCode();
@@ -129,7 +138,7 @@ public class LibertyRestEndpoint extends Application {
     @GET
     @Path("/reviews/{productId}")
     public Response bookReviewsById(@PathParam("productId") int productId,
-                                    @CookieParam("user") Cookie user,
+                                    @HeaderParam("end-user") String user,
                                     @HeaderParam("x-request-id") String xreq,
                                     @HeaderParam("x-b3-traceid") String xtraceid,
                                     @HeaderParam("x-b3-spanid") String xspanid,
